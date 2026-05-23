@@ -183,6 +183,7 @@ export default function ResourceDetail() {
   const isPod = def?.kind === 'Pod';
   const isScalable = !!def && ['Deployment', 'StatefulSet', 'ReplicaSet'].includes(def.kind);
   const isRollable = !!def && ['Deployment', 'StatefulSet', 'DaemonSet'].includes(def.kind);
+  const isEditableData = def?.kind === 'Secret' || def?.kind === 'ConfigMap';
 
   if (!def) return null;
 
@@ -192,6 +193,8 @@ export default function ResourceDetail() {
     router.push(`/(app)/(stack)/r/${def!.slug}/${encodeURIComponent(name!)}/logs?namespace=${encodeURIComponent(namespace ?? '')}` as any);
   const goShell = () =>
     router.push(`/(app)/(stack)/r/${def!.slug}/${encodeURIComponent(name!)}/exec?namespace=${encodeURIComponent(namespace ?? '')}` as any);
+  const goEditData = () =>
+    router.push(`/(app)/(stack)/r/${def!.slug}/${encodeURIComponent(name!)}/edit-data?namespace=${encodeURIComponent(namespace ?? '')}` as any);
 
   // ── Action lists ─────────────────────────────────────────────────────────
   // Primary actions appear as accent-coloured pills in the action bar.
@@ -217,6 +220,9 @@ export default function ResourceDetail() {
   }
   if (isRollable) {
     primary.push({ label: 'Rollout', icon: { ios: 'arrow.triangle.2.circlepath', android: 'sync' }, onPress: rolloutRestart });
+  }
+  if (isEditableData) {
+    primary.push({ label: 'Edit data', icon: { ios: 'pencil', android: 'edit' }, onPress: goEditData });
   }
 
   const menuItems: MenuItemSpec[] = [];
@@ -541,7 +547,7 @@ function OverviewBody({ obj, def }: { obj: K8sObject; def: ResourceDef }) {
 
       {def.kind === 'Pod' ? <PodContainersCard obj={obj} /> : null}
       {def.kind === 'ConfigMap' ? <DataCard data={obj.data ?? {}} /> : null}
-      {def.kind === 'Secret' ? <DataCard data={obj.data ?? {}} masked /> : null}
+      {def.kind === 'Secret' ? <DataCard data={obj.data ?? {}} secret /> : null}
 
       {status.conditions?.length ? (
         <SectionCard title="Conditions">
@@ -598,28 +604,76 @@ function PodContainersCard({ obj }: { obj: K8sObject }) {
   );
 }
 
-function DataCard({ data, masked }: { data: Record<string, string>; masked?: boolean }) {
+function DataCard({ data, secret }: { data: Record<string, string>; secret?: boolean }) {
   const scheme = useScheme();
   const c = Colors[scheme];
   const keys = Object.keys(data);
+  // Per-row reveal toggles for secrets. Map<key, revealed>.
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   return (
     <SectionCard title={`Data · ${keys.length}`}>
-      {keys.map((k) => (
-        <View key={k} style={{ paddingVertical: 6 }}>
-          <Text style={{ ...Typography.subhead, color: c.text, fontWeight: '600' }}>{k}</Text>
-          <Text
-            style={{
-              ...Typography.caption1,
-              color: c.textSecondary,
-              fontFamily: Typography.mono.fontFamily,
-              marginTop: 2,
-            }}
-            numberOfLines={masked ? 1 : 6}
-          >
-            {masked ? '••••••' : (data[k] ?? '')}
-          </Text>
-        </View>
-      ))}
+      {keys.map((k) => {
+        const raw = data[k] ?? '';
+        // Secret values arrive base64-encoded; decode for display but fall back
+        // to the raw string for binary-looking values (e.g. helm release blobs).
+        let display = raw;
+        let binary = false;
+        if (secret) {
+          try {
+            const bin = globalThis.atob(raw);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            display = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          } catch {
+            binary = true;
+            display = '[binary]';
+          }
+        }
+        const isRevealed = !secret || revealed[k];
+        return (
+          <View key={k} style={{ paddingVertical: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text
+                style={{ ...Typography.subhead, color: c.text, fontWeight: '600', flex: 1 }}
+              >
+                {k}
+              </Text>
+              {secret && !binary ? (
+                <Pressable
+                  hitSlop={10}
+                  onPress={() => setRevealed((r) => ({ ...r, [k]: !r[k] }))}
+                >
+                  <Icon
+                    ios={isRevealed ? 'eye.slash' : 'eye'}
+                    android={isRevealed ? 'visibility_off' : 'visibility'}
+                    size={16}
+                    color={c.textSecondary}
+                  />
+                </Pressable>
+              ) : null}
+            </View>
+            <Text
+              selectable={isRevealed && !binary}
+              style={{
+                ...Typography.caption1,
+                color: binary ? c.textTertiary : c.textSecondary,
+                fontFamily: Typography.mono.fontFamily,
+                fontStyle: binary ? 'italic' : 'normal',
+                marginTop: 2,
+                letterSpacing: !isRevealed ? 2 : 0,
+              }}
+              numberOfLines={!isRevealed ? 1 : 6}
+            >
+              {!isRevealed ? '••••••••••••' : display}
+            </Text>
+          </View>
+        );
+      })}
+      {keys.length === 0 ? (
+        <Text style={{ ...Typography.caption1, color: c.textTertiary, fontStyle: 'italic' }}>
+          No data.
+        </Text>
+      ) : null}
     </SectionCard>
   );
 }
