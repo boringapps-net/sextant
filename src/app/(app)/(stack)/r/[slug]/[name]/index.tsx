@@ -14,7 +14,13 @@ import {
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useClusters } from '@/lib/state/cluster-context';
 import { useCRDs } from '@/lib/state/crds-context';
-import { BUILTIN_RESOURCES, parseSlug, type ResourceDef } from '@/lib/k8s/resources';
+import {
+  apiGroupFromVersion,
+  BUILTIN_RESOURCES,
+  findResourceByKindGroup,
+  parseSlug,
+  type ResourceDef,
+} from '@/lib/k8s/resources';
 import { Colors, Radii, Spacing, Typography } from '@/lib/ui/theme';
 import { Glass } from '@/lib/ui/glass';
 import { Icon } from '@/lib/ui/Icon';
@@ -25,6 +31,13 @@ import { MetricsRow } from '@/components/MetricsRow';
 import { Menu, type MenuItemSpec } from '@/components/Menu';
 import { summarize, type RowSummary } from '@/lib/k8s/row-summaries';
 import { useWatchedItem } from '@/lib/state/use-watched-item';
+import {
+  identifyVolumeSource,
+  probeToText,
+  resolveFieldPath,
+  tolerationToText,
+  type VolumeSource,
+} from '@/lib/k8s/pod-derivations';
 
 type Tab = 'overview' | 'yaml';
 
@@ -534,6 +547,8 @@ function OverviewBody({ obj, def }: { obj: K8sObject; def: ResourceDef }) {
         ))}
       </SectionCard>
 
+      <OwnerReferencesCard obj={obj} />
+
       {meta.labels && Object.keys(meta.labels).length ? (
         <SectionCard title="Labels">
           <Chips items={Object.entries(meta.labels).map(([k, v]) => `${k}=${v}`)} />
@@ -546,6 +561,9 @@ function OverviewBody({ obj, def }: { obj: K8sObject; def: ResourceDef }) {
       {def.kind === 'Node' ? <MetricsRow kind="Node" name={meta.name} node={obj} /> : null}
 
       {def.kind === 'Pod' ? <PodContainersCard obj={obj} /> : null}
+      {def.kind === 'Pod' ? <PodVolumesCard obj={obj} /> : null}
+      {def.kind === 'Pod' ? <PodSchedulingCard obj={obj} /> : null}
+      {def.kind === 'Pod' ? <PodRuntimeCard obj={obj} /> : null}
       {def.kind === 'ConfigMap' ? <DataCard data={obj.data ?? {}} /> : null}
       {def.kind === 'Secret' ? <DataCard data={obj.data ?? {}} secret /> : null}
 
@@ -569,9 +587,20 @@ function PodContainersCard({ obj }: { obj: K8sObject }) {
   const c = Colors[scheme];
   const spec: any = obj.spec ?? {};
   const status: any = obj.status ?? {};
-  const containers = [...(spec.initContainers ?? []), ...(spec.containers ?? [])];
+  const containers = [
+    ...(spec.initContainers ?? []).map((cnt: any) => ({ ...cnt, _init: true })),
+    ...(spec.containers ?? []),
+  ];
   const statuses: Record<string, any> = {};
-  for (const s of [...(status.initContainerStatuses ?? []), ...(status.containerStatuses ?? [])]) statuses[s.name] = s;
+  for (const s of [
+    ...(status.initContainerStatuses ?? []),
+    ...(status.containerStatuses ?? []),
+  ]) {
+    statuses[s.name] = s;
+  }
+  // Per-container collapsed state. Default OPEN — most pods have one container
+  // and the expanded body is the point of the page. Tap header to collapse.
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   return (
     <SectionCard title="Containers">
@@ -581,25 +610,652 @@ function PodContainersCard({ obj }: { obj: K8sObject }) {
           ? 'Running'
           : st?.state?.waiting?.reason ?? (st?.state?.terminated?.reason ?? '—');
         const stateColor =
-          state === 'Running' ? c.success : state.includes('Back') || state.includes('Error') ? c.danger : c.warning;
+          state === 'Running'
+            ? c.success
+            : state.includes('Back') || state.includes('Error')
+            ? c.danger
+            : c.warning;
+        const isOpen = !collapsed[cnt.name];
         return (
           <View key={i} style={{ paddingVertical: 6, gap: 2 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: stateColor }} />
-              <Text style={{ ...Typography.headline, color: c.text, flex: 1 }}>{cnt.name}</Text>
-              {st ? (
-                <Text style={{ ...Typography.footnote, color: c.textSecondary }}>
-                  restarts {st.restartCount ?? 0}
+            <Pressable
+              onPress={() => setCollapsed((cs) => ({ ...cs, [cnt.name]: isOpen }))}
+              style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1, gap: 2 })}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: stateColor }} />
+                <Text style={{ ...Typography.headline, color: c.text, flex: 1 }}>
+                  {cnt.name}
+                  {cnt._init ? (
+                    <Text style={{ color: c.textTertiary, ...Typography.caption1 }}> · init</Text>
+                  ) : null}
                 </Text>
-              ) : null}
-            </View>
-            <Text style={{ ...Typography.caption1, color: c.textSecondary, fontFamily: Typography.mono.fontFamily }}>
-              {cnt.image}
-            </Text>
-            <Text style={{ ...Typography.caption1, color: c.textTertiary }}>{state}</Text>
+                {st ? (
+                  <Text style={{ ...Typography.footnote, color: c.textSecondary }}>
+                    restarts {st.restartCount ?? 0}
+                  </Text>
+                ) : null}
+                <Icon
+                  ios={isOpen ? 'chevron.up' : 'chevron.down'}
+                  android={isOpen ? 'expand_less' : 'expand_more'}
+                  size={14}
+                  color={c.textTertiary}
+                />
+              </View>
+              <Text
+                style={{
+                  ...Typography.caption1,
+                  color: c.textSecondary,
+                  fontFamily: Typography.mono.fontFamily,
+                }}
+              >
+                {cnt.image}
+              </Text>
+              <Text style={{ ...Typography.caption1, color: c.textTertiary }}>{state}</Text>
+            </Pressable>
+            {isOpen ? <ContainerExpandedDetails container={cnt} pod={obj} /> : null}
           </View>
         );
       })}
+    </SectionCard>
+  );
+}
+
+// ── Container expansion ────────────────────────────────────────────────────
+// Renders the sub-sections that explain what the container actually sees at
+// runtime: ports, resource quotas, env vars (with downward-API resolution
+// and tappable Secret/ConfigMap refs), envFrom imports, volume mounts paired
+// with their pod-level volume source, and probe one-liners.
+function ContainerExpandedDetails({ container, pod }: { container: any; pod: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const env: any[] = container.env ?? [];
+  const envFrom: any[] = container.envFrom ?? [];
+  const mounts: any[] = container.volumeMounts ?? [];
+  const ports: any[] = container.ports ?? [];
+  const resources: any = container.resources ?? {};
+  const hasResources = !!(resources.requests || resources.limits);
+  const hasProbes = !!(
+    container.livenessProbe ||
+    container.readinessProbe ||
+    container.startupProbe
+  );
+  const cmd: string[] = container.command ?? [];
+  const args: string[] = container.args ?? [];
+
+  return (
+    <View
+      style={{
+        gap: Spacing.md,
+        marginTop: Spacing.sm,
+        paddingTop: Spacing.sm,
+        borderTopWidth: 0.5,
+        borderTopColor: c.separator,
+      }}
+    >
+      {ports.length > 0 ? (
+        <SubSection title="Ports">
+          {ports.map((p, i) => (
+            <Text
+              key={i}
+              style={{
+                color: c.text,
+                ...Typography.caption1,
+                fontFamily: Typography.mono.fontFamily,
+              }}
+            >
+              {[
+                p.name ? `${p.name}:` : null,
+                `${p.containerPort}/${p.protocol ?? 'TCP'}`,
+                p.hostPort ? `→ host ${p.hostPort}` : null,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            </Text>
+          ))}
+        </SubSection>
+      ) : null}
+
+      {hasResources ? (
+        <SubSection title="Resources">
+          {resources.requests ? (
+            <Text
+              style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+            >
+              <Text style={{ color: c.textSecondary }}>requests · </Text>
+              {Object.entries(resources.requests as Record<string, string>)
+                .map(([k, v]) => `${k}=${v}`)
+                .join('   ')}
+            </Text>
+          ) : null}
+          {resources.limits ? (
+            <Text
+              style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+            >
+              <Text style={{ color: c.textSecondary }}>limits · </Text>
+              {Object.entries(resources.limits as Record<string, string>)
+                .map(([k, v]) => `${k}=${v}`)
+                .join('   ')}
+            </Text>
+          ) : null}
+        </SubSection>
+      ) : null}
+
+      {env.length > 0 || envFrom.length > 0 ? (
+        <SubSection title="Environment">
+          {env.map((e, i) => (
+            <EnvVarRow key={`e${i}`} envVar={e} pod={pod} />
+          ))}
+          {envFrom.map((ef, i) => (
+            <EnvFromRow key={`f${i}`} envFrom={ef} pod={pod} />
+          ))}
+        </SubSection>
+      ) : null}
+
+      {mounts.length > 0 ? (
+        <SubSection title="Volume mounts">
+          {mounts.map((m, i) => (
+            <VolumeMountRow key={i} mount={m} pod={pod} />
+          ))}
+        </SubSection>
+      ) : null}
+
+      {hasProbes ? (
+        <SubSection title="Probes">
+          {container.livenessProbe ? (
+            <ProbeLine label="liveness" text={probeToText(container.livenessProbe)} />
+          ) : null}
+          {container.readinessProbe ? (
+            <ProbeLine label="readiness" text={probeToText(container.readinessProbe)} />
+          ) : null}
+          {container.startupProbe ? (
+            <ProbeLine label="startup" text={probeToText(container.startupProbe)} />
+          ) : null}
+        </SubSection>
+      ) : null}
+
+      {cmd.length > 0 || args.length > 0 ? (
+        <SubSection title="Command">
+          {cmd.length > 0 ? (
+            <Text
+              style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+              selectable
+            >
+              {cmd.join(' ')}
+            </Text>
+          ) : null}
+          {args.length > 0 ? (
+            <Text
+              style={{
+                color: c.textSecondary,
+                ...Typography.caption1,
+                fontFamily: Typography.mono.fontFamily,
+              }}
+              selectable
+            >
+              {args.join(' ')}
+            </Text>
+          ) : null}
+        </SubSection>
+      ) : null}
+    </View>
+  );
+}
+
+function EnvVarRow({ envVar, pod }: { envVar: any; pod: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const navigate = useNavigateToResource();
+  const ns = pod.metadata.namespace;
+
+  let value: React.ReactNode;
+  if (envVar.value !== undefined) {
+    value = (
+      <Text
+        style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+        selectable
+      >
+        {String(envVar.value)}
+      </Text>
+    );
+  } else if (envVar.valueFrom?.configMapKeyRef) {
+    const r = envVar.valueFrom.configMapKeyRef;
+    value = (
+      <RefLink onPress={() => navigate('ConfigMap', 'v1', r.name, ns)}>
+        ← configmap/{r.name}:{r.key}
+        {r.optional ? ' (optional)' : ''}
+      </RefLink>
+    );
+  } else if (envVar.valueFrom?.secretKeyRef) {
+    const r = envVar.valueFrom.secretKeyRef;
+    value = (
+      <RefLink onPress={() => navigate('Secret', 'v1', r.name, ns)}>
+        ← secret/{r.name}:{r.key}
+        {r.optional ? ' (optional)' : ''}
+      </RefLink>
+    );
+  } else if (envVar.valueFrom?.fieldRef) {
+    const fp = envVar.valueFrom.fieldRef.fieldPath;
+    const resolved = resolveFieldPath(pod, fp);
+    value = (
+      <Text
+        style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+        selectable
+      >
+        {resolved ?? '—'}
+        <Text style={{ color: c.textTertiary }}>  ({fp})</Text>
+      </Text>
+    );
+  } else if (envVar.valueFrom?.resourceFieldRef) {
+    const rfr = envVar.valueFrom.resourceFieldRef;
+    value = (
+      <Text style={{ color: c.textSecondary, ...Typography.caption1, fontStyle: 'italic' }}>
+        ← {rfr.resource}
+        {rfr.containerName ? ` (container ${rfr.containerName})` : ''}
+      </Text>
+    );
+  } else {
+    value = <Text style={{ color: c.textTertiary, ...Typography.caption1 }}>—</Text>;
+  }
+
+  return (
+    <View style={{ paddingVertical: 3 }}>
+      <Text
+        style={{
+          color: c.textSecondary,
+          ...Typography.caption2,
+          fontFamily: Typography.mono.fontFamily,
+        }}
+      >
+        {envVar.name}
+      </Text>
+      {value}
+    </View>
+  );
+}
+
+function EnvFromRow({ envFrom, pod }: { envFrom: any; pod: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const navigate = useNavigateToResource();
+  const ns = pod.metadata.namespace;
+  const prefix = envFrom.prefix ? ` prefix=${envFrom.prefix}` : '';
+
+  if (envFrom.configMapRef) {
+    const r = envFrom.configMapRef;
+    return (
+      <View style={{ paddingVertical: 3 }}>
+        <Text style={{ color: c.textSecondary, ...Typography.caption2 }}>envFrom</Text>
+        <RefLink onPress={() => navigate('ConfigMap', 'v1', r.name, ns)}>
+          all keys ← configmap/{r.name}
+          {prefix}
+          {r.optional ? ' (optional)' : ''}
+        </RefLink>
+      </View>
+    );
+  }
+  if (envFrom.secretRef) {
+    const r = envFrom.secretRef;
+    return (
+      <View style={{ paddingVertical: 3 }}>
+        <Text style={{ color: c.textSecondary, ...Typography.caption2 }}>envFrom</Text>
+        <RefLink onPress={() => navigate('Secret', 'v1', r.name, ns)}>
+          all keys ← secret/{r.name}
+          {prefix}
+          {r.optional ? ' (optional)' : ''}
+        </RefLink>
+      </View>
+    );
+  }
+  return null;
+}
+
+function VolumeMountRow({ mount, pod }: { mount: any; pod: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const navigate = useNavigateToResource();
+  // Look up the corresponding pod-level volume so the mount tells you both
+  // *where* it lives in the container and *what* it actually is.
+  const volumes: any[] = (pod.spec as any)?.volumes ?? [];
+  const v = volumes.find((x) => x.name === mount.name);
+  const source: VolumeSource | undefined = v ? identifyVolumeSource(v) : undefined;
+  const ns = pod.metadata.namespace;
+
+  return (
+    <View style={{ paddingVertical: 3 }}>
+      <Text
+        style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+      >
+        {mount.mountPath}
+        {mount.subPath ? <Text style={{ color: c.textTertiary }}>  subPath={mount.subPath}</Text> : null}
+        {mount.readOnly ? <Text style={{ color: c.textTertiary }}>  ro</Text> : null}
+      </Text>
+      {source?.ref ? (
+        <RefLink
+          onPress={() => navigate(source.ref!.kind, refApiVersion(source.ref!.kind), source.ref!.name, ns)}
+        >
+          ← {source.type}/{source.ref.name}
+        </RefLink>
+      ) : (
+        <Text style={{ color: c.textTertiary, ...Typography.caption2 }}>
+          ← {source?.type ?? mount.name}
+          {source?.detail ? ` (${source.detail})` : ''}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+function ProbeLine({ label, text }: { label: string; text: string }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  return (
+    <Text
+      style={{ color: c.text, ...Typography.caption1, fontFamily: Typography.mono.fontFamily }}
+    >
+      <Text style={{ color: c.textSecondary }}>{label} · </Text>
+      {text}
+    </Text>
+  );
+}
+
+// ── Pod-level cards ────────────────────────────────────────────────────────
+// One card each for the three big "where does this pod fit in the cluster"
+// questions: which volumes does it consume, where does it get scheduled and
+// under whose identity, and what runtime flags / security context apply.
+
+function PodVolumesCard({ obj }: { obj: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const navigate = useNavigateToResource();
+  const volumes: any[] = (obj.spec as any)?.volumes ?? [];
+  if (volumes.length === 0) return null;
+  const ns = obj.metadata.namespace;
+
+  return (
+    <SectionCard title={`Volumes · ${volumes.length}`}>
+      {volumes.map((v, i) => {
+        const src = identifyVolumeSource(v);
+        return (
+          <View key={i} style={{ paddingVertical: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text
+                style={{
+                  ...Typography.subhead,
+                  color: c.text,
+                  fontWeight: '600',
+                  flex: 1,
+                  fontFamily: Typography.mono.fontFamily,
+                }}
+              >
+                {v.name}
+              </Text>
+              <Text style={{ ...Typography.caption1, color: c.textTertiary }}>{src.type}</Text>
+            </View>
+            {src.ref ? (
+              <RefLink
+                onPress={() => navigate(src.ref!.kind, refApiVersion(src.ref!.kind), src.ref!.name, ns)}
+              >
+                {src.ref.kind.toLowerCase()}/{src.ref.name}
+                {src.detail ? `  (${src.detail})` : ''}
+              </RefLink>
+            ) : src.detail ? (
+              <Text
+                style={{
+                  ...Typography.caption1,
+                  color: c.textSecondary,
+                  fontFamily: Typography.mono.fontFamily,
+                  marginTop: 2,
+                }}
+              >
+                {src.detail}
+              </Text>
+            ) : null}
+          </View>
+        );
+      })}
+    </SectionCard>
+  );
+}
+
+function PodSchedulingCard({ obj }: { obj: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const navigate = useNavigateToResource();
+  const spec: any = obj.spec ?? {};
+  const ns = obj.metadata.namespace;
+
+  const hasNodeSelector = spec.nodeSelector && Object.keys(spec.nodeSelector).length > 0;
+  const tolerations: any[] = spec.tolerations ?? [];
+  const pullSecrets: any[] = spec.imagePullSecrets ?? [];
+  const sa = spec.serviceAccountName ?? spec.serviceAccount;
+
+  if (
+    !spec.nodeName &&
+    !sa &&
+    !spec.priorityClassName &&
+    spec.priority === undefined &&
+    !hasNodeSelector &&
+    tolerations.length === 0 &&
+    pullSecrets.length === 0
+  ) {
+    return null;
+  }
+
+  return (
+    <SectionCard title="Scheduling">
+      {spec.nodeName ? (
+        <View style={{ paddingVertical: 4 }}>
+          <Text style={{ ...Typography.caption1, color: c.textSecondary }}>Node</Text>
+          <RefLink onPress={() => navigate('Node', 'v1', spec.nodeName)}>
+            {spec.nodeName}
+          </RefLink>
+        </View>
+      ) : null}
+      {sa ? (
+        <View style={{ paddingVertical: 4 }}>
+          <Text style={{ ...Typography.caption1, color: c.textSecondary }}>Service account</Text>
+          <RefLink onPress={() => navigate('ServiceAccount', 'v1', sa, ns)}>{sa}</RefLink>
+        </View>
+      ) : null}
+      {spec.priorityClassName ? (
+        <KV k="Priority class" v={spec.priorityClassName} />
+      ) : null}
+      {spec.priority !== undefined ? <KV k="Priority" v={String(spec.priority)} /> : null}
+      {pullSecrets.length > 0 ? (
+        <View style={{ paddingVertical: 4 }}>
+          <Text style={{ ...Typography.caption1, color: c.textSecondary }}>Image pull secrets</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 }}>
+            {pullSecrets.map((s, i) => (
+              <RefLink key={i} onPress={() => navigate('Secret', 'v1', s.name, ns)}>
+                {s.name}
+              </RefLink>
+            ))}
+          </View>
+        </View>
+      ) : null}
+      {hasNodeSelector ? (
+        <View style={{ paddingVertical: 4 }}>
+          <Text style={{ ...Typography.caption1, color: c.textSecondary }}>Node selector</Text>
+          <Chips
+            items={Object.entries(spec.nodeSelector as Record<string, string>).map(
+              ([k, v]) => `${k}=${v}`,
+            )}
+          />
+        </View>
+      ) : null}
+      {tolerations.length > 0 ? (
+        <View style={{ paddingVertical: 4 }}>
+          <Text style={{ ...Typography.caption1, color: c.textSecondary }}>Tolerations</Text>
+          {tolerations.map((t, i) => (
+            <Text
+              key={i}
+              style={{
+                color: c.text,
+                ...Typography.caption1,
+                fontFamily: Typography.mono.fontFamily,
+              }}
+            >
+              {tolerationToText(t)}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </SectionCard>
+  );
+}
+
+function PodRuntimeCard({ obj }: { obj: K8sObject }) {
+  const spec: any = obj.spec ?? {};
+  const status: any = obj.status ?? {};
+  const sc = spec.securityContext ?? {};
+
+  const rows: Array<[string, string]> = [];
+  if (spec.restartPolicy) rows.push(['Restart policy', spec.restartPolicy]);
+  if (spec.dnsPolicy) rows.push(['DNS policy', spec.dnsPolicy]);
+  if (typeof spec.terminationGracePeriodSeconds === 'number') {
+    rows.push(['Term. grace', `${spec.terminationGracePeriodSeconds}s`]);
+  }
+  if (status.qosClass) rows.push(['QoS class', status.qosClass]);
+  if (status.hostIP) rows.push(['Host IP', status.hostIP]);
+  if (spec.hostNetwork) rows.push(['Host network', 'true']);
+  if (spec.hostPID) rows.push(['Host PID', 'true']);
+  if (spec.hostIPC) rows.push(['Host IPC', 'true']);
+  if (spec.shareProcessNamespace) rows.push(['Share PID ns', 'true']);
+  if (sc.runAsUser !== undefined) rows.push(['runAsUser', String(sc.runAsUser)]);
+  if (sc.runAsGroup !== undefined) rows.push(['runAsGroup', String(sc.runAsGroup)]);
+  if (sc.runAsNonRoot !== undefined) rows.push(['runAsNonRoot', String(sc.runAsNonRoot)]);
+  if (sc.fsGroup !== undefined) rows.push(['fsGroup', String(sc.fsGroup)]);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <SectionCard title="Runtime">
+      {rows.map(([k, v], i) => (
+        <KV key={i} k={k} v={v} />
+      ))}
+    </SectionCard>
+  );
+}
+
+// ── Building blocks shared by the pod cards ────────────────────────────────
+
+function SubSection({ title, children }: { title: string; children: React.ReactNode }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  return (
+    <View style={{ gap: 2 }}>
+      <Text
+        style={{
+          ...Typography.caption2,
+          color: c.textTertiary,
+          textTransform: 'uppercase',
+          letterSpacing: 0.6,
+          marginBottom: 2,
+        }}
+      >
+        {title}
+      </Text>
+      {children}
+    </View>
+  );
+}
+
+function RefLink({
+  onPress,
+  children,
+}: {
+  onPress: () => void;
+  children: React.ReactNode;
+}) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  return (
+    <Pressable onPress={onPress} hitSlop={6}>
+      <Text
+        style={{
+          color: c.accent,
+          ...Typography.caption1,
+          fontFamily: Typography.mono.fontFamily,
+        }}
+      >
+        {children}
+      </Text>
+    </Pressable>
+  );
+}
+
+// Hook form: resolves built-ins and CRDs (via the cluster context) and
+// routes to the correct detail screen, honouring namespace-scope. Used by
+// every cross-resource link on the detail page — env refs, volume sources,
+// scheduling refs, owner references.
+function useNavigateToResource() {
+  const router = useRouter();
+  const { crds } = useCRDs();
+  return useCallback(
+    (kind: string, apiVersion: string, name: string, namespace?: string) => {
+      const group = apiGroupFromVersion(apiVersion);
+      const def = findResourceByKindGroup(kind, group, crds);
+      if (!def) return;
+      const nsPart =
+        namespace && def.namespaced ? `?namespace=${encodeURIComponent(namespace)}` : '';
+      router.push(`/(app)/(stack)/r/${def.slug}/${encodeURIComponent(name)}${nsPart}` as any);
+    },
+    [router, crds],
+  );
+}
+
+// The volume-source / pod-spec references don't carry an apiVersion; everything
+// the pod can reference natively (ConfigMap, Secret, PVC, ServiceAccount, Node)
+// is in the core "v1" group, so default there.
+function refApiVersion(_kind: string): string {
+  return 'v1';
+}
+
+// Generic owner-references card. Reads metadata.ownerReferences and turns each
+// entry into a tappable link via the kind+apiVersion-aware navigate hook.
+// Works for any resource kind — that's how you get the Pod → ReplicaSet →
+// Deployment chain by tapping through.
+function OwnerReferencesCard({ obj }: { obj: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const navigate = useNavigateToResource();
+  const refs = obj.metadata.ownerReferences ?? [];
+  if (refs.length === 0) return null;
+  // Owner refs always live in the same namespace as the owned object.
+  const ns = obj.metadata.namespace;
+
+  return (
+    <SectionCard title="Owner references">
+      {refs.map((r, i) => (
+        <View
+          key={i}
+          style={{
+            paddingVertical: 6,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <Text
+            style={{
+              ...Typography.caption1,
+              color: c.textSecondary,
+              minWidth: 90,
+            }}
+          >
+            {r.kind}
+          </Text>
+          <View style={{ flex: 1 }}>
+            <RefLink onPress={() => navigate(r.kind, r.apiVersion, r.name, ns)}>
+              {r.name}
+            </RefLink>
+          </View>
+          {r.controller ? (
+            <Text style={{ color: c.textTertiary, ...Typography.caption2 }}>controller</Text>
+          ) : null}
+        </View>
+      ))}
     </SectionCard>
   );
 }

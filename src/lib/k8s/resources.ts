@@ -304,3 +304,25 @@ export function parseSlug(slug: string): { plural: string; apiGroup: string } {
   if (dot === -1) return { plural: slug, apiGroup: '' };
   return { plural: slug.slice(0, dot), apiGroup: slug.slice(dot + 1) };
 }
+
+// Look up a built-in or CRD resource def by Kind + apiGroup. apiGroup is the
+// group prefix of an apiVersion ("apps/v1" → "apps", "v1" → "" for core).
+// Owner references and other refs carry kind+apiVersion, so this lets us turn
+// them into a navigable ResourceDef without baking a static kind-to-slug map.
+export function findResourceByKindGroup(
+  kind: string,
+  apiGroup: string,
+  crds: ResourceDef[],
+): ResourceDef | undefined {
+  const builtin = BUILTIN_RESOURCES.find(
+    (r) => r.kind === kind && r.apiGroup === apiGroup,
+  );
+  if (builtin) return builtin;
+  return crds.find((r) => r.kind === kind && r.apiGroup === apiGroup);
+}
+
+// "apps/v1" → "apps", "v1" → "", "acme.example.com/v1beta1" → "acme.example.com"
+export function apiGroupFromVersion(apiVersion: string): string {
+  const slash = apiVersion.indexOf('/');
+  return slash === -1 ? '' : apiVersion.slice(0, slash);
+}

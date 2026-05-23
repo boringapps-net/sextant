@@ -53,27 +53,23 @@ export function Menu({
   const scheme = useScheme();
   const c = Colors[scheme];
   const insets = useSafeAreaInsets();
-  const opacity = useRef(new Animated.Value(0)).current;
-  const scale = useRef(new Animated.Value(0.94)).current;
+  // Only `scale` is JS-animated. The entrance fade is handled by the Modal
+  // itself (`animationType="fade"`) — running an opacity transition on the
+  // GlassView's container caused UIGlassEffect to capture an empty backdrop
+  // snapshot on first mount, so the menu showed up transparent until the user
+  // dismissed and reopened it (and a cached frame filled it in).
+  const scale = useRef(new Animated.Value(0.95)).current;
 
   useEffect(() => {
     if (!visible) return;
-    opacity.setValue(0);
-    scale.setValue(0.94);
-    Animated.parallel([
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 140,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scale, {
-        toValue: 1,
-        damping: 18,
-        stiffness: 240,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [visible, opacity, scale]);
+    scale.setValue(0.95);
+    Animated.spring(scale, {
+      toValue: 1,
+      damping: 18,
+      stiffness: 240,
+      useNativeDriver: true,
+    }).start();
+  }, [visible, scale]);
 
   const horizontal = position === 'top-right' ? { right: 12 } : { left: 12 };
   const top = (topOffset ?? insets.top) + 6;
@@ -82,11 +78,19 @@ export function Menu({
     <Modal
       transparent
       visible={visible}
-      animationType="none"
+      // Platform fade: composes the GlassView snapshot at full opacity, which
+      // avoids the first-open "no blur" bug we had with manual JS opacity.
+      animationType="fade"
       onRequestClose={onClose}
       statusBarTranslucent
     >
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
+      <Pressable
+        // A subtle backdrop dim both reads as "modal" and gives the glass
+        // material something concrete to sample so the popover edge stays
+        // crisp against any background.
+        style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.18)' }]}
+        onPress={onClose}
+      >
         {/* The inner View needs `pointerEvents="box-none"` so taps that miss the
             card fall through to the backdrop Pressable above and dismiss. */}
         <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
@@ -94,7 +98,7 @@ export function Menu({
             // Stop taps inside the card from bubbling to the backdrop.
             pointerEvents="box-none"
             style={[
-              { position: 'absolute', top, opacity, transform: [{ scale }] },
+              { position: 'absolute', top, transform: [{ scale }] },
               horizontal,
             ]}
           >
