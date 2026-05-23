@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ExpoK8sMtlsModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.k8smtls.ExpoK8sMtlsModule"]
+  }
+}

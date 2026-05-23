@@ -1,15 +1,51 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import { useColorScheme } from 'react-native';
+import 'react-native-gesture-handler';
+import { useScheme } from "@/lib/ui/scheme";
+import { useEffect } from 'react';
+import { } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { Stack, useRouter, useSegments } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
+import { StatusBar } from 'expo-status-bar';
+import { ClusterProvider, useClusters } from '@/lib/state/cluster-context';
+import { Colors } from '@/lib/ui/theme';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+function Gate({ children }: { children: React.ReactNode }) {
+  const { loading, clusters } = useClusters();
+  const router = useRouter();
+  const segments = useSegments() as string[];
+
+  useEffect(() => {
+    if (loading) return;
+    SplashScreen.hideAsync().catch(() => {});
+    const inOnboarding = segments[0] === '(onboarding)';
+    if (clusters.length === 0 && !inOnboarding) {
+      router.replace('/(onboarding)');
+    } else if (clusters.length > 0 && inOnboarding) {
+      router.replace('/(app)/(stack)');
+    }
+  }, [loading, clusters, segments, router]);
+
+  return <>{children}</>;
+}
+
+export default function RootLayout() {
+  const scheme = useScheme();
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors[scheme].background }}>
+      <SafeAreaProvider>
+        <ClusterProvider>
+          <Gate>
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="(app)" />
+              <Stack.Screen name="(onboarding)" />
+            </Stack>
+            <StatusBar style="auto" />
+          </Gate>
+        </ClusterProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

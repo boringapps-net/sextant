@@ -1,0 +1,8 @@
+{
+  "name": "expo-k8s-mtls",
+  "version": "0.1.0",
+  "description": "Native HTTP client for Kubernetes with mTLS + custom CA support",
+  "main": "src/index.ts",
+  "private": true,
+  "expo-module": "expo-module.config.json"
+}

@@ -8,6 +8,9 @@
       ],
       "@/assets/*": [
         "./assets/*"
+      ],
+      "expo-k8s-mtls": [
+        "./modules/expo-k8s-mtls/src/index.ts"
       ]
     }
   },
