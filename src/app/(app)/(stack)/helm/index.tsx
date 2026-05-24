@@ -143,8 +143,11 @@ export default function HelmReleasesScreen() {
 
   const onPressRow = useCallback(
     (r: HelmRelease) => {
+      // Flat path with namespace as query — matches the resource detail
+      // URL shape and works around an expo-router drawer issue triggered
+      // by deeper nested dynamic segments.
       router.push(
-        `/(app)/(stack)/helm/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}` as any,
+        `/(app)/(stack)/helm/${encodeURIComponent(r.name)}?namespace=${encodeURIComponent(r.namespace)}` as any,
       );
     },
     [router],

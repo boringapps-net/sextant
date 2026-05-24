@@ -20,6 +20,12 @@ type Tab = 'overview' | 'values' | 'manifest' | 'history' | 'notes';
 export default function HelmReleaseDetail() {
   const scheme = useScheme();
   const c = Colors[scheme];
+  // namespace is a query param (the URL is /helm/<name>?namespace=<ns>),
+  // matching the resource-detail screen at /r/<slug>/<name>?namespace=<ns>.
+  // The earlier nested /helm/<ns>/<name>/ path was triggering a drawer-
+  // routing glitch on phones — the drawer would stay open after navigating
+  // into a release. Flattening to a single dynamic segment fixes it and is
+  // more consistent with the rest of the app anyway.
   const { namespace, name } = useLocalSearchParams<{ namespace: string; name: string }>();
   const { client } = useClusters();
 
