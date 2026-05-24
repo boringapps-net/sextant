@@ -86,8 +86,12 @@ export function DrawerContent(props: any) {
       if (!tablet) props.navigation?.closeDrawer?.();
       return;
     }
-    router.replace(path as any);
+    // Close the drawer BEFORE navigating. Doing it the other way around
+    // (replace first, then closeDrawer) was eating the close for some
+    // routes — the navigation triggered an unmount that dropped the
+    // queued close action before it ran.
     if (!tablet) props.navigation?.closeDrawer?.();
+    router.replace(path as any);
   }
 
   // A single resource row. Used for built-ins directly and as the contents of

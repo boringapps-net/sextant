@@ -143,11 +143,14 @@ export default function HelmReleasesScreen() {
 
   const onPressRow = useCallback(
     (r: HelmRelease) => {
-      // Flat path with namespace as query — matches the resource detail
-      // URL shape and works around an expo-router drawer issue triggered
-      // by deeper nested dynamic segments.
+      // Detail lives under a separate top-level segment so the list page
+      // (this file: (stack)/helm.tsx) is a plain file route — exactly the
+      // shape port-forwards.tsx / clusters.tsx use. A `helm/` directory
+      // sibling to helm.tsx (or a `helm/index.tsx` + nested children)
+      // breaks the drawer-close behaviour for this route in expo-router,
+      // so we sidestep it entirely.
       router.push(
-        `/(app)/(stack)/helm/${encodeURIComponent(r.name)}?namespace=${encodeURIComponent(r.namespace)}` as any,
+        `/(app)/(stack)/helm-release/${encodeURIComponent(r.name)}?namespace=${encodeURIComponent(r.namespace)}` as any,
       );
     },
     [router],
