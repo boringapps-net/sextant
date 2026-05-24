@@ -3,6 +3,10 @@
 # dependencies
 node_modules/
 
+# build artifacts
+build-*.ipa
+build-*.tar.gz
+
 # Expo
 .expo/
 dist/

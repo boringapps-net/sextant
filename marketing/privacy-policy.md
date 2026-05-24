@@ -1,6 +1,6 @@
 # Sextant — Privacy Policy
 
-**Template to publish at https://boringapps.net/sextant/privacy.** Review and adjust before going live. Reflects the app's actual behaviour as of v1.0.0.
+**Template to publish at https://boringapps.net/apps/sextant/privacy.** Review and adjust before going live. Reflects the app's actual behaviour as of v1.0.0.
 
 ---
 
@@ -44,7 +44,7 @@ The app makes no other network requests. There are no analytics requests, no cra
 
 ## Verifying These Claims
 
-The Sextant source code is publicly available at **github.com/boringapps/sextant** under the Functional Source License (FSL-1.1-MIT). You — or anyone you trust to read code — can audit the entire app and verify that the statements in this policy are accurate. The README's "Why the source is here" section lists the specific files to look at.
+The Sextant source code is publicly available at **github.com/boringapps-net/sextant** under the Functional Source License (FSL-1.1-MIT). You — or anyone you trust to read code — can audit the entire app and verify that the statements in this policy are accurate. The README's "Why the source is here" section lists the specific files to look at.
 
 ## Children's Privacy
 
@@ -64,8 +64,8 @@ If you have questions about this policy or the app's behaviour, please contact:
 
 **Nick Pratley**
 The IT Dept Pty Ltd
-Email: nick@npratley.net
-Web: https://boringapps.net/sextant
+Email: hello@boringapps.net
+Web: https://boringapps.net/apps/sextant
 
 ---
 

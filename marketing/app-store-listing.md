@@ -96,7 +96,7 @@ feature before adding your real cluster.
 
 OPEN SOURCE
 
-Source published at github.com/boringapps/sextant (FSL-1.1-MIT). Read
+Source published at github.com/boringapps-net/sextant (FSL-1.1-MIT). Read
 the code, audit the network calls, verify the privacy claims. Issues
 and pull requests welcome.
 ```
@@ -130,9 +130,9 @@ Optional additions if you trim something: `oncall,observability,yaml,exec,namesp
 
 | Field | Value |
 |---|---|
-| **Marketing URL** (optional) | https://boringapps.net/sextant |
-| **Support URL** (required) | https://boringapps.net/sextant/support |
-| **Privacy Policy URL** (required) | https://boringapps.net/sextant/privacy |
+| **Marketing URL** (optional) | https://boringapps.net/apps/sextant |
+| **Support URL** (required) | https://boringapps.net/apps/sextant/support |
+| **Privacy Policy URL** (required) | https://boringapps.net/apps/sextant/privacy |
 
 You need a real privacy policy live before submitting. See `marketing/privacy-policy.md` for a draft template.
 
@@ -150,7 +150,7 @@ First public release of Sextant.
 • Built-in demo cluster — try every feature before you connect
 • No backend, no telemetry, no account — credentials stay on device
 
-Source: github.com/boringapps/sextant
+Source: github.com/boringapps-net/sextant
 ```
 
 (~410 chars; the field allows much more but short is fine for v1.)
@@ -192,7 +192,7 @@ only iOS standard TLS — no custom or proprietary cryptography.
 | **Contact First Name** | Nick |
 | **Contact Last Name** | Pratley |
 | **Contact Phone** | (your contact) |
-| **Contact Email** | nick@npratley.net |
+| **Contact Email** | hello@boringapps.net |
 | **Notes** | (paste the block above) |
 
 ---
@@ -256,8 +256,8 @@ Min 3, max 10 per device class. Recommendation: 5–7 per class is the sweet spo
 
 ## Open Items / TODO Before Submit
 
-- [ ] Privacy Policy live at https://boringapps.net/sextant/privacy
-- [ ] Support page live at https://boringapps.net/sextant/support
+- [ ] Privacy Policy live at https://boringapps.net/apps/sextant/privacy
+- [ ] Support page live at https://boringapps.net/apps/sextant/support
 - [ ] Decide pricing
 - [ ] Decide whether to launch on Google Play simultaneously (Play has its own metadata file — happy to draft when you say go)
 - [ ] App Store screenshots captured + reviewed
