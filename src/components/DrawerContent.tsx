@@ -14,6 +14,7 @@ import { useRouter, usePathname } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useClusters } from '@/lib/state/cluster-context';
 import { useCRDs } from '@/lib/state/crds-context';
+import { usePortForwards } from '@/lib/state/port-forward-context';
 import { BUILTIN_RESOURCES, RESOURCE_CATEGORIES, type ResourceDef } from '@/lib/k8s/resources';
 import { Colors, Radii, Spacing, Typography } from '@/lib/ui/theme';
 import { Glass } from '@/lib/ui/glass';
@@ -28,6 +29,10 @@ export function DrawerContent(props: any) {
   const pathname = usePathname();
   const { active, clusters, activate, activeNamespace } = useClusters();
   const { crds, loading: crdsLoading } = useCRDs();
+  const { forwards } = usePortForwards();
+  const activeForwards = forwards.filter(
+    (f) => f.status === 'listening' || f.status === 'starting',
+  ).length;
   const [search, setSearch] = useState('');
   // Track which CRD domains are expanded. Defaults to all collapsed; opening one persists for the session.
   const [openDomains, setOpenDomains] = useState<Set<string>>(new Set());
@@ -328,6 +333,86 @@ export function DrawerContent(props: any) {
             </View>
           );
         })}
+
+        {/* Tools — non-resource utilities like port forwards live here. */}
+        <View style={{ paddingHorizontal: Spacing.md, marginTop: Spacing.md }}>
+          <Text
+            style={{
+              ...Typography.footnote,
+              color: c.textSecondary,
+              textTransform: 'uppercase',
+              letterSpacing: 1,
+              fontWeight: '600',
+              paddingHorizontal: Spacing.sm,
+              paddingBottom: 4,
+            }}
+          >
+            Tools
+          </Text>
+          {(() => {
+            const focused = pathname === '/port-forwards';
+            return (
+              <Pressable
+                onPress={() => go('/(app)/(stack)/port-forwards')}
+                style={({ pressed }) => ({
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: Spacing.md,
+                  paddingLeft: Spacing.sm,
+                  paddingRight: Spacing.sm,
+                  paddingVertical: 8,
+                  borderRadius: Radii.md,
+                  backgroundColor: focused
+                    ? c.accentSubtle
+                    : pressed
+                    ? c.surfaceMuted
+                    : 'transparent',
+                })}
+              >
+                <Icon
+                  ios="arrow.left.arrow.right"
+                  android="swap_horiz"
+                  size={18}
+                  color={focused ? c.accent : c.textSecondary}
+                />
+                <Text
+                  style={{
+                    ...Typography.callout,
+                    color: focused ? c.accent : c.text,
+                    fontWeight: focused ? '600' : '400',
+                    flex: 1,
+                  }}
+                  numberOfLines={1}
+                >
+                  Port forwards
+                </Text>
+                {activeForwards > 0 ? (
+                  <View
+                    style={{
+                      backgroundColor: c.accent,
+                      paddingHorizontal: 6,
+                      borderRadius: 8,
+                      minWidth: 18,
+                      height: 18,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        ...Typography.caption2,
+                        color: '#fff',
+                        fontWeight: '700',
+                      }}
+                    >
+                      {activeForwards}
+                    </Text>
+                  </View>
+                ) : null}
+              </Pressable>
+            );
+          })()}
+        </View>
 
         {clusters.length > 1 ? (
           <View style={{ paddingHorizontal: Spacing.md, marginTop: Spacing.xl }}>

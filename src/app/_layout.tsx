@@ -8,6 +8,7 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { ClusterProvider, useClusters } from '@/lib/state/cluster-context';
+import { PortForwardProvider } from '@/lib/state/port-forward-context';
 import { Colors } from '@/lib/ui/theme';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -37,13 +38,15 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors[scheme].background }}>
       <SafeAreaProvider>
         <ClusterProvider>
-          <Gate>
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="(app)" />
-              <Stack.Screen name="(onboarding)" />
-            </Stack>
-            <StatusBar style="auto" />
-          </Gate>
+          <PortForwardProvider>
+            <Gate>
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="(app)" />
+                <Stack.Screen name="(onboarding)" />
+              </Stack>
+              <StatusBar style="auto" />
+            </Gate>
+          </PortForwardProvider>
         </ClusterProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

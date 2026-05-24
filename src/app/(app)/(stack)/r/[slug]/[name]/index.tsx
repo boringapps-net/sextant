@@ -31,6 +31,7 @@ import { MetricsRow } from '@/components/MetricsRow';
 import { Menu, type MenuItemSpec } from '@/components/Menu';
 import { summarize, type RowSummary } from '@/lib/k8s/row-summaries';
 import { useWatchedItem } from '@/lib/state/use-watched-item';
+import { useStartPortForward } from '@/lib/state/port-forward-context';
 import {
   identifyVolumeSource,
   probeToText,
@@ -534,7 +535,8 @@ function OverviewBody({ obj, def }: { obj: K8sObject; def: ResourceDef }) {
   if (def.kind === 'Service') {
     rows.push(['Type', spec.type ?? '—']);
     rows.push(['Cluster IP', spec.clusterIP ?? '—']);
-    rows.push(['Ports', (spec.ports ?? []).map((p: any) => `${p.port}/${p.protocol ?? 'TCP'}`).join(', ') || '—']);
+    // Service ports get their own card (tappable chips) below — skipping
+    // the plain text row keeps the metadata block tight.
   }
 
   return (
@@ -564,6 +566,7 @@ function OverviewBody({ obj, def }: { obj: K8sObject; def: ResourceDef }) {
       {def.kind === 'Pod' ? <PodVolumesCard obj={obj} /> : null}
       {def.kind === 'Pod' ? <PodSchedulingCard obj={obj} /> : null}
       {def.kind === 'Pod' ? <PodRuntimeCard obj={obj} /> : null}
+      {def.kind === 'Service' ? <ServicePortsCard obj={obj} /> : null}
       {def.kind === 'ConfigMap' ? <DataCard data={obj.data ?? {}} /> : null}
       {def.kind === 'Secret' ? <DataCard data={obj.data ?? {}} secret /> : null}
 
@@ -695,24 +698,11 @@ function ContainerExpandedDetails({ container, pod }: { container: any; pod: K8s
     >
       {ports.length > 0 ? (
         <SubSection title="Ports">
-          {ports.map((p, i) => (
-            <Text
-              key={i}
-              style={{
-                color: c.text,
-                ...Typography.caption1,
-                fontFamily: Typography.mono.fontFamily,
-              }}
-            >
-              {[
-                p.name ? `${p.name}:` : null,
-                `${p.containerPort}/${p.protocol ?? 'TCP'}`,
-                p.hostPort ? `→ host ${p.hostPort}` : null,
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            </Text>
-          ))}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {ports.map((p, i) => (
+              <PortChip key={i} port={p} pod={pod} />
+            ))}
+          </View>
         </SubSection>
       ) : null}
 
@@ -943,6 +933,296 @@ function VolumeMountRow({ mount, pod }: { mount: any; pod: K8sObject }) {
         </Text>
       )}
     </View>
+  );
+}
+
+// Service ports card. Each spec.ports entry is a chip; tapping resolves a
+// backing pod via Endpoints and starts a Pod port-forward to that pod's
+// targetPort (numeric or named-port-in-pod resolution).
+function ServicePortsCard({ obj }: { obj: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const ports: any[] = (obj.spec as any)?.ports ?? [];
+  if (ports.length === 0) return null;
+  return (
+    <SectionCard title={`Ports · ${ports.length}`}>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingTop: 2 }}>
+        {ports.map((p, i) => (
+          <ServicePortChip key={i} port={p} service={obj} />
+        ))}
+      </View>
+      <Text
+        style={{
+          ...Typography.caption2,
+          color: c.textTertiary,
+          marginTop: 8,
+        }}
+      >
+        Tap a port to forward via the first ready endpoint.
+      </Text>
+    </SectionCard>
+  );
+}
+
+function ServicePortChip({ port, service }: { port: any; service: K8sObject }) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const startForward = useStartPortForward();
+  const { client } = useClusters();
+  const [resolving, setResolving] = useState(false);
+
+  const portNum = Number(port.port);
+  if (!portNum) return null;
+  const protoSuffix =
+    port.protocol && port.protocol !== 'TCP' ? `/${port.protocol}` : '';
+  const targetSuffix =
+    port.targetPort !== undefined && port.targetPort !== portNum
+      ? `  →  ${port.targetPort}`
+      : '';
+  const label = [
+    port.name ? port.name : null,
+    `${portNum}${protoSuffix}${targetSuffix}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  async function onPress() {
+    if (!client || resolving) return;
+    const ns = service.metadata.namespace ?? 'default';
+    const svcName = service.metadata.name;
+    const epDef = BUILTIN_RESOURCES.find((r) => r.slug === 'endpoints');
+    const podDef = BUILTIN_RESOURCES.find((r) => r.slug === 'pods');
+    if (!epDef || !podDef) return;
+
+    setResolving(true);
+    try {
+      // Resolve a backing pod for the service. We try two sources in order:
+      //   1) the legacy core/v1 Endpoints object (still served by every K8s
+      //      version we care about; the simplest "give me pods for this svc"
+      //      API);
+      //   2) discovery.k8s.io/v1 EndpointSlices, labelled
+      //      kubernetes.io/service-name=<svcName>. This is the modern API and
+      //      is the only one some 1.33+ configurations may keep populating.
+      // We pick the first address that carries a targetRef.name — port-forward
+      // needs a pod name, not just an IP.
+      let chosen: { name: string; namespace?: string } | undefined;
+      let readyCount = 0;        // addresses we saw with targetRef.name
+      let ipOnlyCount = 0;       // addresses with no targetRef (manually-created Endpoints, headless edge cases)
+      let notReadyCount = 0;     // notReadyAddresses we observed
+
+      // ── Try Endpoints first ───────────────────────────────────────────
+      let endpointsFound = false;
+      try {
+        const endpoints: any = await client.get(epDef, svcName, ns);
+        endpointsFound = true;
+        for (const subset of endpoints.subsets ?? []) {
+          for (const addr of subset.addresses ?? []) {
+            if (addr.targetRef?.name) {
+              readyCount++;
+              if (!chosen) {
+                chosen = {
+                  name: addr.targetRef.name,
+                  namespace: addr.targetRef.namespace ?? ns,
+                };
+              }
+            } else if (addr.ip) {
+              ipOnlyCount++;
+            }
+          }
+          notReadyCount += (subset.notReadyAddresses ?? []).length;
+        }
+      } catch (e: any) {
+        // Most likely a 404 (Endpoints removed in K8s 1.33+, or the object
+        // never existed for a freshly-created service). Fall through to
+        // EndpointSlices — don't abort.
+      }
+
+      // ── Fallback: EndpointSlices ──────────────────────────────────────
+      if (!chosen) {
+        const sliceDef = {
+          apiGroup: 'discovery.k8s.io',
+          apiVersion: 'v1',
+          plural: 'endpointslices',
+          namespaced: true,
+        };
+        try {
+          const slices: any = await client.list(sliceDef, {
+            namespace: ns,
+            labelSelector: `kubernetes.io/service-name=${svcName}`,
+          });
+          for (const slice of slices.items ?? []) {
+            for (const ep of slice.endpoints ?? []) {
+              // EndpointSlice marks ready=true/false/undefined per endpoint.
+              // Treat undefined as ready (matches the K8s conformance default).
+              const isReady = ep.conditions?.ready !== false;
+              if (isReady && ep.targetRef?.name) {
+                readyCount++;
+                if (!chosen) {
+                  chosen = {
+                    name: ep.targetRef.name,
+                    namespace: ep.targetRef.namespace ?? ns,
+                  };
+                }
+              } else if (!ep.targetRef?.name && (ep.addresses ?? []).length > 0) {
+                ipOnlyCount++;
+              } else if (!isReady) {
+                notReadyCount++;
+              }
+            }
+          }
+        } catch {
+          // Cluster doesn't expose EndpointSlices; nothing more to try.
+        }
+      }
+
+      if (!chosen) {
+        const detail =
+          readyCount === 0 && ipOnlyCount === 0 && notReadyCount === 0
+            ? endpointsFound
+              ? `Endpoints exists but lists no addresses. The service selector may not match any running pods.`
+              : `Could not read Endpoints or EndpointSlices for ${svcName}. Check RBAC for the endpoints / endpointslices verbs.`
+            : `${readyCount} ready, ${notReadyCount} not-ready, ${ipOnlyCount} address(es) without a pod targetRef. Port-forward needs a pod name.`;
+        Alert.alert('Cannot resolve service endpoint', detail);
+        return;
+      }
+      const podName = chosen.name;
+      const podNs = chosen.namespace ?? ns;
+
+      // Resolve targetPort. Numbers go straight through; named ports require
+      // looking up the matching containerPort in the backing pod's spec.
+      let remotePort: number;
+      const tp = port.targetPort;
+      if (typeof tp === 'number') {
+        remotePort = tp;
+      } else if (typeof tp === 'string' && tp.length > 0) {
+        const pod: any = await client.get(podDef, podName, podNs);
+        const containers: any[] = pod.spec?.containers ?? [];
+        let found: number | undefined;
+        outer: for (const cnt of containers) {
+          for (const p of cnt.ports ?? []) {
+            if (p.name === tp) {
+              found = Number(p.containerPort);
+              break outer;
+            }
+          }
+        }
+        if (!found) {
+          Alert.alert(
+            'Named port not found',
+            `Pod ${podName} doesn't expose a port named "${tp}".`,
+          );
+          return;
+        }
+        remotePort = found;
+      } else {
+        // targetPort absent → defaults to the service port.
+        remotePort = portNum;
+      }
+
+      await startForward({
+        sourceKind: 'Service',
+        sourceName: svcName,
+        podName,
+        namespace: podNs,
+        remotePort,
+      });
+    } catch (e: any) {
+      Alert.alert('Could not resolve service endpoint', e?.message ?? String(e));
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={resolving}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        backgroundColor: pressed ? c.accent + '33' : c.accentSubtle,
+        borderRadius: 999,
+        opacity: resolving ? 0.5 : 1,
+      })}
+    >
+      <Icon ios="arrow.left.arrow.right" android="swap_horiz" size={12} color={c.accent} />
+      <Text
+        style={{
+          ...Typography.caption1,
+          color: c.accent,
+          fontFamily: Typography.mono.fontFamily,
+          fontWeight: '600',
+        }}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+// Tappable port chip. Each pod container port becomes a small pill that
+// kicks off a port-forward via the global PortForwardProvider; on success
+// the user gets a "Open in Safari" prompt with the bound local URL.
+function PortChip({
+  port,
+  pod,
+  sourceKind = 'Pod',
+  sourceName,
+}: {
+  port: any;
+  pod: K8sObject;
+  /** Override when the chip is rendered on a Service detail (svc → backing pod). */
+  sourceKind?: 'Pod' | 'Service';
+  /** Override when the source kind isn't Pod. */
+  sourceName?: string;
+}) {
+  const scheme = useScheme();
+  const c = Colors[scheme];
+  const startForward = useStartPortForward();
+  const portNum = Number(port.containerPort ?? port.port);
+  if (!portNum || Number.isNaN(portNum)) return null;
+  const label = [
+    port.name ? port.name : null,
+    `${portNum}${port.protocol && port.protocol !== 'TCP' ? `/${port.protocol}` : ''}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <Pressable
+      onPress={() =>
+        startForward({
+          sourceKind,
+          sourceName: sourceName ?? pod.metadata.name,
+          podName: pod.metadata.name,
+          namespace: pod.metadata.namespace ?? 'default',
+          remotePort: portNum,
+        })
+      }
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        backgroundColor: pressed ? c.accent + '33' : c.accentSubtle,
+        borderRadius: 999,
+      })}
+    >
+      <Icon ios="arrow.left.arrow.right" android="swap_horiz" size={12} color={c.accent} />
+      <Text
+        style={{
+          ...Typography.caption1,
+          color: c.accent,
+          fontFamily: Typography.mono.fontFamily,
+          fontWeight: '600',
+        }}
+      >
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 

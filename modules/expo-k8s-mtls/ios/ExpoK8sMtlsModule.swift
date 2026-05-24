@@ -2,6 +2,7 @@ import ExpoModulesCore
 import Foundation
 import Network
 import Security
+import UIKit
 
 // A request payload from JS. Fields mirror those defined in TS index.ts.
 struct K8sRequestOptions: Record {
@@ -44,6 +45,26 @@ struct K8sWebSocketOptions: Record {
   @Field var tlsServerName: String?
 }
 
+struct K8sPortForwardOptions: Record {
+  // Cluster API server URL. Same scheme as the bearer/mtls config used for
+  // other native calls — we re-parse it here so the bridge can rebuild the
+  // upstream NWConnection per-TCP-connection.
+  @Field var serverUrl: String = ""
+  @Field var namespace: String = ""
+  @Field var podName: String = ""
+  // The pod-side port to forward to.
+  @Field var remotePort: Int = 0
+  // The desired local port. 0 = let the OS assign one.
+  @Field var localPort: Int = 0
+  // Authorization / extra headers (e.g. "Authorization: Bearer …").
+  @Field var headers: [String: String] = [:]
+  @Field var pkcs12Base64: String?
+  @Field var pkcs12Password: String?
+  @Field var caBundlesDerBase64: [String] = []
+  @Field var insecureSkipTLSVerify: Bool = false
+  @Field var tlsServerName: String?
+}
+
 public final class ExpoK8sMtlsModule: Module {
   // Active streaming sessions keyed by stream id so JS can cancel.
   private var streams: [String: URLSession] = [:]
@@ -56,13 +77,31 @@ public final class ExpoK8sMtlsModule: Module {
   internal var sockets: [String: ManualWebSocket] = [:]
   internal let socketsLock = NSLock()
 
+  // Active port-forward sessions keyed by id. Each owns a NWListener and a
+  // collection of TCP↔K8sWS bridges (see PortForwarder.swift).
+  internal var portForwards: [String: PortForwardSession] = [:]
+  internal let portForwardsLock = NSLock()
+
+  // We hold a single UIApplication background task while at least one port
+  // forward is active. iOS gives us a finite window (typically 25-180s
+  // depending on system load) after the user switches away — enough for a
+  // few Safari round-trips against a live forward, which is the whole
+  // point. If the user keeps the forward open longer than the budget, iOS
+  // suspends us, the listener stops accepting, and the forward effectively
+  // ends until they return. That's the documented expectation and matches
+  // kubectl's "closes when terminal closes" semantics.
+  private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+  private let backgroundTaskLock = NSLock()
+
   public func definition() -> ModuleDefinition {
     Name("ExpoK8sMtls")
 
-    // Events emitted from streaming requests + WebSocket sessions.
+    // Events emitted from streaming requests + WebSocket sessions + port
+    // forwards.
     Events(
       "onK8sChunk", "onK8sDone", "onK8sError",
-      "onK8sWsOpen", "onK8sWsMessage", "onK8sWsClose", "onK8sWsError"
+      "onK8sWsOpen", "onK8sWsMessage", "onK8sWsClose", "onK8sWsError",
+      "onK8sPfListening", "onK8sPfStatus", "onK8sPfError", "onK8sPfClosed"
     )
 
     AsyncFunction("request") { (options: K8sRequestOptions, promise: Promise) in
@@ -254,6 +293,145 @@ public final class ExpoK8sMtlsModule: Module {
       self.socketsLock.unlock()
       ws?.close()
     }
+
+    // ── Port forward ────────────────────────────────────────────────────
+    // Spin up a local 127.0.0.1 TCP listener that bridges every incoming
+    // connection through a fresh K8s portforward.k8s.io WebSocket. Returns a
+    // synchronous id; the bound local port arrives via `onK8sPfListening`.
+    Function("startPortForward") { (options: K8sPortForwardOptions) -> String in
+      let id = UUID().uuidString
+      self.openPortForward(id: id, options: options)
+      return id
+    }
+
+    Function("stopPortForward") { (id: String) in
+      self.portForwardsLock.lock()
+      let session = self.portForwards.removeValue(forKey: id)
+      self.portForwardsLock.unlock()
+      session?.stop(reason: "user-stopped")
+      self.refreshBackgroundTask()
+    }
+  }
+
+  // MARK: - Background task lifecycle
+  // Called whenever the active-forward count changes. Begins a background
+  // task when going from 0 → ≥1, ends it when going back to 0. iOS won't
+  // start the countdown until the app actually moves to background, so
+  // calling this in the foreground is a no-op apart from registering intent.
+  internal func refreshBackgroundTask() {
+    portForwardsLock.lock()
+    let activeCount = portForwards.count
+    portForwardsLock.unlock()
+
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else { return }
+      self.backgroundTaskLock.lock()
+      defer { self.backgroundTaskLock.unlock() }
+
+      if activeCount > 0 && self.backgroundTaskId == .invalid {
+        let id = UIApplication.shared.beginBackgroundTask(withName: "k8s-portforward") { [weak self] in
+          // Expiration handler — iOS is about to suspend us. End the task
+          // gracefully; outstanding forwards will stop accepting on the next
+          // listener event after suspension.
+          NSLog("[k8s-mtls] background task expiring; ending and letting the OS suspend us")
+          self?.endBackgroundTaskLocked()
+        }
+        self.backgroundTaskId = id
+        NSLog("[k8s-mtls] began background task id=%lu for %d active port forward(s)",
+              UInt(id.rawValue), activeCount)
+      } else if activeCount == 0 && self.backgroundTaskId != .invalid {
+        self.endBackgroundTaskLocked()
+      }
+    }
+  }
+
+  // Must be called with backgroundTaskLock held OR on a path where mutual
+  // exclusion is guaranteed (the expiration handler runs after refresh has
+  // released the lock).
+  private func endBackgroundTaskLocked() {
+    if backgroundTaskId != .invalid {
+      let id = backgroundTaskId
+      backgroundTaskId = .invalid
+      UIApplication.shared.endBackgroundTask(id)
+      NSLog("[k8s-mtls] ended background task id=%lu", UInt(id.rawValue))
+    }
+  }
+
+  // MARK: - Port forward bring-up
+  private func openPortForward(id: String, options: K8sPortForwardOptions) {
+    // Parse the API server URL once so the bridge knows the host/port/scheme
+    // and we don't have to re-validate on every TCP accept.
+    guard let serverURL = URL(string: options.serverUrl),
+          let host = serverURL.host else {
+      sendEvent("onK8sPfError", [
+        "id": id, "name": "InvalidURL",
+        "message": "Bad cluster URL: \(options.serverUrl)",
+      ])
+      sendEvent("onK8sPfClosed", ["id": id, "reason": "invalid-url"])
+      return
+    }
+    let isTLS = (serverURL.scheme?.lowercased() ?? "https") == "https"
+    let port = UInt16(serverURL.port ?? (isTLS ? 443 : 80))
+    let wsScheme = isTLS ? "wss" : "ws"
+    // K8s SPDY-over-WS port-forward path. The remote port is *not* a query
+    // parameter — kubectl never puts it there, and the apiserver expects the
+    // port to come in via the SPDY stream headers (streamType + port +
+    // requestID). PortForwardBridge.startSpdy() sends those when it opens
+    // the data/error streams.
+    let path = "/api/v1/namespaces/\(options.namespace)/pods/\(options.podName)/portforward"
+
+    let upstream = PortForwardUpstream(
+      scheme: wsScheme,
+      host: host,
+      port: port,
+      path: path,
+      headers: options.headers.map { ($0.key, $0.value) },
+      pkcs12Base64: options.pkcs12Base64,
+      pkcs12Password: options.pkcs12Password,
+      caBundlesDerBase64: options.caBundlesDerBase64,
+      insecureSkipTLSVerify: options.insecureSkipTLSVerify,
+      tlsServerName: options.tlsServerName,
+      remotePort: UInt16(options.remotePort)
+    )
+
+    // Build the local listener. localPort=0 → OS picks an ephemeral port and
+    // reports it back via onK8sPfListening. We intentionally don't set
+    // requiredLocalEndpoint — that's for outbound connections, and setting it
+    // on a listener silently breaks accept on at least some iOS versions.
+    // NWListener binds to all interfaces by default, which is fine: Safari
+    // will reach us via 127.0.0.1 either way and nothing on-device gets
+    // anything we wouldn't already share over loopback.
+    let params = NWParameters.tcp
+    params.allowLocalEndpointReuse = true
+    params.includePeerToPeer = false
+    let listener: NWListener
+    do {
+      if options.localPort == 0 {
+        listener = try NWListener(using: params)
+      } else {
+        listener = try NWListener(
+          using: params,
+          on: NWEndpoint.Port(integerLiteral: UInt16(options.localPort))
+        )
+      }
+    } catch {
+      sendEvent("onK8sPfError", [
+        "id": id, "name": "ListenerCreate",
+        "message": "Could not bind 127.0.0.1:\(options.localPort): \(error.localizedDescription)",
+      ])
+      sendEvent("onK8sPfClosed", ["id": id, "reason": "bind-failed"])
+      return
+    }
+
+    let queue = DispatchQueue(label: "expo.k8s.pf.\(id)")
+    let session = PortForwardSession(
+      id: id, module: self, listener: listener, queue: queue, upstream: upstream
+    )
+    self.portForwardsLock.lock()
+    self.portForwards[id] = session
+    self.portForwardsLock.unlock()
+    session.start()
+    refreshBackgroundTask()
   }
 
   // MARK: - NWConnection-based WebSocket
@@ -347,15 +525,40 @@ public final class ExpoK8sMtlsModule: Module {
     let fullPath = url.path + (url.query.map { "?" + $0 } ?? "")
     let extraHeaders: [(String, String)] = options.headers.map { ($0.key, $0.value) }
 
+    // JS-bound callbacks: each event fires the corresponding onK8sWs* native
+    // event keyed by wsId. The port-forward bridge constructs a different set
+    // of callbacks that consume the messages locally instead.
+    let jsCallbacks = ManualWebSocket.Callbacks(
+      onOpen: { [weak self] proto in
+        self?.sendEvent("onK8sWsOpen", ["wsId": wsId, "protocol": proto])
+      },
+      onText: { [weak self] text in
+        self?.sendEvent("onK8sWsMessage", ["wsId": wsId, "kind": "text", "data": text])
+      },
+      onBinary: { [weak self] data in
+        self?.sendEvent("onK8sWsMessage", [
+          "wsId": wsId, "kind": "binary", "data": data.base64EncodedString(),
+        ])
+      },
+      onClose: { [weak self] code, reason in
+        self?.sendEvent("onK8sWsClose", ["wsId": wsId, "code": code, "reason": reason])
+      },
+      onError: { [weak self] name, message, status in
+        var payload: [String: Any] = ["wsId": wsId, "name": name, "message": message]
+        if let status = status { payload["status"] = status }
+        self?.sendEvent("onK8sWsError", payload)
+      }
+    )
+
     let ws = ManualWebSocket(
       wsId: wsId,
-      module: self,
       hostHeader: hostHeader,
       path: fullPath,
       protocols: options.protocols,
       extraHeaders: extraHeaders,
       conn: conn,
-      queue: queue
+      queue: queue,
+      callbacks: jsCallbacks
     )
 
     conn.stateUpdateHandler = { [weak self, weak ws] state in

@@ -17,7 +17,17 @@ import Security
 /// callbacks run on `queue` and JS-initiated sends dispatch onto it before
 /// touching the connection. No locks needed.
 final class ManualWebSocket {
-  weak var module: ExpoK8sMtlsModule?
+  /// Closure-based event sink. The module's JS-bound path passes callbacks
+  /// that forward to sendEvent; the in-Swift port-forward bridge passes
+  /// callbacks that handle the K8s portforward stream framing locally.
+  struct Callbacks {
+    var onOpen: (_ negotiatedProtocol: String) -> Void = { _ in }
+    var onText: (_ text: String) -> Void = { _ in }
+    var onBinary: (_ data: Data) -> Void = { _ in }
+    var onClose: (_ code: Int, _ reason: String) -> Void = { _, _ in }
+    var onError: (_ name: String, _ message: String, _ status: Int?) -> Void = { _, _, _ in }
+  }
+
   let wsId: String
   let conn: NWConnection
   let queue: DispatchQueue
@@ -27,31 +37,38 @@ final class ManualWebSocket {
   let extraHeaders: [(String, String)]
   let secWebSocketKey: String
   let expectedAccept: String
+  let callbacks: Callbacks
 
   // All state below is queue-confined.
   private var rxBuffer = Data()
   private var handshakeDone = false
   private var closed = false
   private var negotiatedProtocol = ""
+  // Set when we got a non-101 status. Keeps the receive loop alive so the
+  // body can finish arriving — most servers (K8s included) explain *why* the
+  // upgrade was rejected in the response body, not the headers.
+  private var handshakeFailed = false
+  private var failedStatus = 0
+  private var failedHeaders = ""
 
   init(
     wsId: String,
-    module: ExpoK8sMtlsModule,
     hostHeader: String,
     path: String,
     protocols: [String],
     extraHeaders: [(String, String)],
     conn: NWConnection,
-    queue: DispatchQueue
+    queue: DispatchQueue,
+    callbacks: Callbacks
   ) {
     self.wsId = wsId
-    self.module = module
     self.conn = conn
     self.queue = queue
     self.hostHeader = hostHeader
     self.path = path
     self.protocols = protocols
     self.extraHeaders = extraHeaders
+    self.callbacks = callbacks
 
     // RFC 6455 §4.1: Sec-WebSocket-Key is a base64-encoded 16-byte nonce.
     var keyBytes = [UInt8](repeating: 0, count: 16)
@@ -114,19 +131,52 @@ final class ManualWebSocket {
       }
       if let data = data, !data.isEmpty {
         self.rxBuffer.append(data)
-        if !self.handshakeDone {
+        if self.handshakeFailed {
+          // Keep accumulating body bytes; a timer scheduled when we hit
+          // !=101 will emit the full diagnostic once enough body has
+          // arrived (or 300ms passes).
+        } else if !self.handshakeDone {
           self.processHandshake()
         } else {
           self.processFrames()
         }
       }
       if isComplete {
-        // Server closed the TCP side.
+        // Server closed the TCP side. The interpretation depends on where we
+        // are in the handshake — without this branching, a non-101 response
+        // followed immediately by FIN raced our deferred handshake-failure
+        // emitter and the real error was lost.
         if !self.closed {
-          self.module?.sendEvent("onK8sWsClose", [
-            "wsId": self.wsId, "code": 1000, "reason": "peer-closed-tcp",
-          ])
-          self.closed = true
+          if self.handshakeFailed {
+            // We've already parsed a non-101 status. Whatever body fit in
+            // rxBuffer is everything we'll get; emit the proper HTTPError
+            // now instead of letting the 300ms timer get there first.
+            self.emitHandshakeFailure()
+          } else if !self.handshakeDone {
+            // Server hung up the TCP without responding to the upgrade
+            // request at all. Most commonly: an LB / reverse-proxy in front
+            // of the apiserver is stripping the WS Upgrade header, or the
+            // PortForwardWebsockets feature gate is off on a pre-1.32
+            // cluster, or the cluster's apiserver returned nothing because
+            // it didn't recognise the path / method.
+            self.callbacks.onError(
+              "UpgradeNoResponse",
+              "K8s closed the TCP connection without responding to the WebSocket upgrade request.\n\n"
+              + "Common causes:\n"
+              + "  • A load balancer / reverse proxy in front of the apiserver is not forwarding the WS Upgrade header (e.g. an L7 LB without WS support).\n"
+              + "  • The cluster's PortForwardWebsockets feature gate is disabled (pre-1.32 with feature gate off).\n"
+              + "  • An ingress controller terminating TLS in front of the apiserver and not proxying WebSocket upgrades.\n\n"
+              + "Try: kubectl --v=8 port-forward against the same pod from a workstation — if that's also failing on WebSocket upgrade you've confirmed the cluster side; if it works via SPDY there, the apiserver is fine but our WS path is blocked.",
+              nil
+            )
+            self.closed = true
+            self.conn.cancel()
+          } else {
+            // Normal post-handshake close (the WS lived a healthy life and
+            // got a FIN).
+            self.callbacks.onClose(1000, "peer-closed-tcp")
+            self.closed = true
+          }
         }
         return
       }
@@ -177,15 +227,17 @@ final class ManualWebSocket {
     }
 
     if status != 101 {
-      var payload: [String: Any] = [
-        "wsId": wsId,
-        "name": "HTTPError",
-        "status": status,
-        "message": "Server returned HTTP \(status) instead of 101 Switching Protocols.\n\nFull response:\n\n\(headerStr)",
-      ]
-      module?.sendEvent("onK8sWsError", payload)
-      closed = true
-      conn.cancel()
+      // Don't emit yet — the server typically explains the actual cause in
+      // the response body (e.g. "Unable to upgrade: portforward WebSockets
+      // feature gate is disabled", or "Bad Request: unable to negotiate
+      // subprotocol"). Keep the receive loop alive for ~300ms so the body
+      // can arrive, then emit the full diagnostic.
+      handshakeFailed = true
+      failedStatus = status
+      failedHeaders = headerStr
+      queue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        self?.emitHandshakeFailure()
+      }
       return
     }
 
@@ -228,7 +280,7 @@ final class ManualWebSocket {
     }
 
     handshakeDone = true
-    module?.sendEvent("onK8sWsOpen", ["wsId": wsId, "protocol": negotiatedProtocol])
+    callbacks.onOpen(negotiatedProtocol)
 
     // The first frame data may have arrived in the same TCP read.
     if !rxBuffer.isEmpty {
@@ -298,14 +350,10 @@ final class ManualWebSocket {
     switch frame.opcode {
     case 0x1: // text
       if let text = String(data: frame.payload, encoding: .utf8) {
-        module?.sendEvent("onK8sWsMessage", [
-          "wsId": wsId, "kind": "text", "data": text,
-        ])
+        callbacks.onText(text)
       }
     case 0x2: // binary
-      module?.sendEvent("onK8sWsMessage", [
-        "wsId": wsId, "kind": "binary", "data": frame.payload.base64EncodedString(),
-      ])
+      callbacks.onBinary(frame.payload)
     case 0x8: // close
       // Echo + close. Pull the status code out of the payload if present.
       var code = 1000
@@ -317,20 +365,15 @@ final class ManualWebSocket {
         }
       }
       sendFrame(opcode: 0x8, payload: frame.payload)
-      module?.sendEvent("onK8sWsClose", [
-        "wsId": wsId, "code": code, "reason": reason,
-      ])
+      callbacks.onClose(code, reason)
       closed = true
       conn.cancel()
     case 0x9: // ping → reply pong
       sendFrame(opcode: 0xA, payload: frame.payload)
     case 0xA: // pong — nothing to do
       break
-    case 0x0: // continuation — we currently treat as binary append; K8s doesn't fragment
-      // For correctness we'd reassemble; for now this is best-effort.
-      module?.sendEvent("onK8sWsMessage", [
-        "wsId": wsId, "kind": "binary", "data": frame.payload.base64EncodedString(),
-      ])
+    case 0x0: // continuation — best-effort; K8s exec/portforward don't fragment.
+      callbacks.onBinary(frame.payload)
     default:
       break
     }
@@ -401,9 +444,32 @@ final class ManualWebSocket {
     if closed { return }
     closed = true
     NSLog("[k8s-mtls] ws %@ ✗ %@", wsId, message)
-    module?.sendEvent("onK8sWsError", [
-      "wsId": wsId, "name": "WebSocketError", "message": message,
-    ])
+    callbacks.onError("WebSocketError", message, nil)
+    conn.cancel()
+  }
+
+  /// Called by the deferred scheduler after a non-101 handshake response.
+  /// Emits the actual server explanation (response body) alongside the
+  /// status and headers. The body is the load-bearing part of the error —
+  /// the K8s API server uses it for "Unable to upgrade" reasons.
+  private func emitHandshakeFailure() {
+    if closed { return }
+    let bodyStr: String
+    if rxBuffer.isEmpty {
+      bodyStr = "(no body)"
+    } else if let s = String(data: rxBuffer, encoding: .utf8) {
+      bodyStr = s
+    } else {
+      bodyStr = "(\(rxBuffer.count) bytes of non-UTF-8 body)"
+    }
+    NSLog("[k8s-mtls] ws %@ ✗ handshake failed: HTTP %d\nheaders:\n%@\nbody:\n%@",
+          wsId, failedStatus, failedHeaders, bodyStr)
+    callbacks.onError(
+      "HTTPError",
+      "Server returned HTTP \(failedStatus) instead of 101 Switching Protocols.\n\nResponse headers:\n\(failedHeaders)\n\nResponse body:\n\(bodyStr)",
+      failedStatus
+    )
+    closed = true
     conn.cancel()
   }
 }

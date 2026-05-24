@@ -17,6 +17,11 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
 
+  # libz is needed for SPDY/3 NV header block compression (used inside the
+  # tunnelled WS port-forward protocol). Apple ships zlib at /usr/lib/libz
+  # on iOS; we use @_silgen_name bindings in Zlib.swift to call into it.
+  s.library = 'z'
+
   s.source_files = "**/*.{h,m,swift}"
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

@@ -1,7 +1,10 @@
 import {
+  nativePortForward,
   nativeRequest,
   nativeStream,
   nativeWebSocket,
+  type PortForwardCallbacks,
+  type PortForwardHandle,
   type StreamHandle,
   type WsHandle,
 } from 'expo-k8s-mtls';
@@ -604,6 +607,43 @@ export class K8sClient {
         ws.close();
       },
     };
+  }
+
+  // Open a port-forward to a pod. Returns immediately with a handle whose
+  // local TCP port is *not yet bound* — the assigned port comes back via the
+  // onListening callback (when localPort=0 was requested). Callers can call
+  // stop() at any time.
+  portForward(
+    namespace: string,
+    podName: string,
+    remotePort: number,
+    cb: PortForwardCallbacks = {},
+    options: { localPort?: number } = {},
+  ): PortForwardHandle {
+    const headers = this.credentialHeaders();
+    log({
+      kind: 'request',
+      transport: 'native',
+      method: 'PF',
+      url: `${this.conn.server}/api/v1/namespaces/${namespace}/pods/${podName}/portforward?ports=${remotePort}`,
+      headers: redact(headers),
+    });
+    return nativePortForward(
+      {
+        serverUrl: this.conn.server,
+        namespace,
+        podName,
+        remotePort,
+        localPort: options.localPort ?? 0,
+        headers,
+        pkcs12Base64: this.conn.pkcs12Base64,
+        pkcs12Password: this.conn.pkcs12Password,
+        caBundlesDerBase64: this.conn.caBundlesDerBase64,
+        insecureSkipTLSVerify: this.conn.insecureSkipTLSVerify,
+        tlsServerName: this.conn.tlsServerName,
+      },
+      cb,
+    );
   }
 
   async ping(signal?: AbortSignal): Promise<{ gitVersion: string; platform: string }> {

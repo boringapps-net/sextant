@@ -25,6 +25,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.decodeBase64
 import java.io.ByteArrayInputStream
+import java.net.ServerSocket
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
@@ -81,8 +82,17 @@ class ExpoK8sMtlsModule : Module() {
   private val streams = ConcurrentHashMap<String, Call>()
   // Active WebSocket sessions.
   private val sockets = ConcurrentHashMap<String, WebSocket>()
+  // Active port-forward sessions — each owns a ServerSocket + N TCP↔WS bridges.
+  private val portForwards = ConcurrentHashMap<String, PortForwardSession>()
   private val streamJob = SupervisorJob()
   private val streamScope = CoroutineScope(Dispatchers.IO + streamJob)
+
+  // Allow PortForwardSession to emit events without exposing `sendEvent` (which
+  // is protected on the Module base class). Kept internal so it stays
+  // module-private.
+  internal fun emit(event: String, payload: Bundle) {
+    sendEvent(event, payload)
+  }
 
   override fun definition() = ModuleDefinition {
     Name("ExpoK8sMtls")
@@ -90,6 +100,7 @@ class ExpoK8sMtlsModule : Module() {
     Events(
       "onK8sChunk", "onK8sDone", "onK8sError",
       "onK8sWsOpen", "onK8sWsMessage", "onK8sWsClose", "onK8sWsError",
+      "onK8sPfListening", "onK8sPfStatus", "onK8sPfError", "onK8sPfClosed",
     )
 
     AsyncFunction("request") { options: K8sRequestOptions ->
@@ -213,8 +224,16 @@ class ExpoK8sMtlsModule : Module() {
           sockets.remove(wsId)
           val status = response?.code ?: 0
           val hint = httpStatusHint(status)
+          // K8s puts the actual upgrade-failure reason in the body — read it
+          // so the user sees "feature gate disabled" / "subprotocol mismatch"
+          // rather than a bare HTTP code.
+          val body = try { response?.body?.string().orEmpty() } catch (_: Throwable) { "" }
           val msg = if (status > 0) {
-            "Handshake failed: HTTP $status" + (if (hint.isNotEmpty()) " — $hint" else "")
+            buildString {
+              append("Handshake failed: HTTP ").append(status)
+              if (hint.isNotEmpty()) append(" — ").append(hint)
+              if (body.isNotEmpty()) append("\n\nResponse body:\n").append(body)
+            }
           } else {
             t.message ?: t.toString()
           }
@@ -246,13 +265,76 @@ class ExpoK8sMtlsModule : Module() {
       sockets.remove(wsId)?.close(1000, "client-closed")
     }
 
+    // ── Port forward ────────────────────────────────────────────────────
+    // Bind a local ServerSocket and bridge every accepted connection through
+    // a fresh portforward.k8s.io WebSocket. Returns the session id
+    // synchronously; the assigned local port (if 0 was requested) arrives via
+    // the `onK8sPfListening` event.
+    Function("startPortForward") { options: K8sPortForwardOptions ->
+      val id = UUID.randomUUID().toString()
+      try {
+        openPortForward(id, options)
+      } catch (t: Throwable) {
+        sendEvent("onK8sPfError", bundleOf(
+          "id" to id,
+          "name" to (t::class.simpleName ?: "Error"),
+          "message" to (t.message ?: t.toString()),
+        ))
+        sendEvent("onK8sPfClosed", bundleOf("id" to id, "reason" to "init-failed"))
+      }
+      id
+    }
+
+    Function("stopPortForward") { id: String ->
+      portForwards.remove(id)?.stop("user-stopped")
+    }
+
     OnDestroy {
       streams.values.forEach { it.cancel() }
       streams.clear()
       sockets.values.forEach { it.close(1000, "destroy") }
       sockets.clear()
+      portForwards.values.forEach { it.stop("destroy") }
+      portForwards.clear()
       streamJob.cancel()
     }
+  }
+
+  // MARK: - Port forward bring-up
+  private fun openPortForward(id: String, options: K8sPortForwardOptions) {
+    // Reuse the existing client builder via the request-options shape — only
+    // TLS fields are read, the same way startWebSocket does it.
+    val ro = K8sRequestOptions().apply {
+      url = options.serverUrl
+      pkcs12Base64 = options.pkcs12Base64
+      pkcs12Password = options.pkcs12Password
+      caBundlesDerBase64 = options.caBundlesDerBase64
+      insecureSkipTLSVerify = options.insecureSkipTLSVerify
+      tlsServerName = options.tlsServerName
+    }
+    val httpClient = buildClient(ro, streaming = true)
+
+    // Compose the upstream wss:// URL — same path shape kubectl uses for
+    // websocket port-forward (the API server multiplexes streams over it).
+    val base = options.serverUrl.trimEnd('/')
+    val wssBase = base.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://")
+    val upstreamUrl =
+      "$wssBase/api/v1/namespaces/${options.namespace}/pods/${options.podName}/portforward?ports=${options.remotePort}"
+
+    // Bind a 127.0.0.1 listener. options.localPort==0 → OS picks an ephemeral
+    // port (read back from ServerSocket.localPort once bound).
+    val server = ServerSocket(options.localPort, 50, pfLoopback())
+
+    val session = PortForwardSession(
+      id = id,
+      module = this,
+      server = server,
+      client = httpClient,
+      upstreamUrl = upstreamUrl,
+      headers = options.headers,
+    )
+    portForwards[id] = session
+    session.start()
   }
 
   // Reuse TLS plumbing by mapping WS options to the request-options shape used

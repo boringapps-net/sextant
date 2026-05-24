@@ -51,6 +51,29 @@ type WsOpenEvent = { wsId: string; protocol: string };
 type WsCloseEvent = { wsId: string; code: number; reason: string };
 type WsErrorEvent = { wsId: string; name?: string; message: string; status?: number };
 
+export type K8sPortForwardOptions = {
+  // Cluster API server URL (https://host:port). The native side rewrites the
+  // scheme to wss:// and appends /api/v1/namespaces/{ns}/pods/{name}/portforward.
+  serverUrl: string;
+  namespace: string;
+  podName: string;
+  remotePort: number;
+  // 0 → let the OS pick an ephemeral port; the bound port comes back via the
+  // `onListening` callback.
+  localPort?: number;
+  headers?: Record<string, string>;
+  pkcs12Base64?: string;
+  pkcs12Password?: string;
+  caBundlesDerBase64?: string[];
+  insecureSkipTLSVerify?: boolean;
+  tlsServerName?: string;
+};
+
+type PfListeningEvent = { id: string; localPort: number };
+type PfStatusEvent = { id: string; kind: string; bridges: number };
+type PfErrorEvent = { id: string; name?: string; message: string };
+type PfClosedEvent = { id: string; reason: string };
+
 type ExpoK8sMtls = {
   request(opts: K8sNativeRequest): Promise<K8sNativeResponse>;
   startStream(opts: K8sNativeRequest): string;
@@ -59,6 +82,8 @@ type ExpoK8sMtls = {
   sendWebSocketBinary(wsId: string, base64: string): Promise<boolean>;
   sendWebSocketText(wsId: string, text: string): Promise<boolean>;
   closeWebSocket(wsId: string): void;
+  startPortForward(opts: K8sPortForwardOptions): string;
+  stopPortForward(id: string): void;
   addListener(name: string, fn: (e: any) => void): Sub;
 };
 
@@ -186,6 +211,67 @@ export function nativeWebSocket(opts: K8sWsOptions, cb: WsCallbacks): WsHandle {
       if (closed) return;
       native.closeWebSocket(wsId);
       cleanup();
+    },
+  };
+}
+
+// MARK: Port forward
+
+export type PortForwardHandle = {
+  /** Stable id assigned by the native side. */
+  id: string;
+  /** Tell native to tear down the listener and any active bridges. */
+  stop(): void;
+};
+
+export type PortForwardCallbacks = {
+  /** Fires once the local TCP listener is bound; carries the assigned port. */
+  onListening?: (info: { localPort: number }) => void;
+  /** Per-connection-open / connection-close pings. `bridges` is the current count. */
+  onStatus?: (info: { kind: string; bridges: number }) => void;
+  /** Non-fatal errors (a single TCP bridge died) and fatal ones share this path. */
+  onError?: (err: { name?: string; message: string }) => void;
+  /** Fires once the whole session is dead, including after the user calls stop(). */
+  onClosed?: (info: { reason: string }) => void;
+};
+
+export function nativePortForward(
+  opts: K8sPortForwardOptions,
+  cb: PortForwardCallbacks = {},
+): PortForwardHandle {
+  const id = native.startPortForward(opts);
+  const subs: Sub[] = [];
+  let stopped = false;
+  const cleanup = () => {
+    if (stopped) return;
+    stopped = true;
+    for (const s of subs) s.remove();
+  };
+
+  subs.push(
+    native.addListener('onK8sPfListening', (e: PfListeningEvent) => {
+      if (e.id === id) cb.onListening?.({ localPort: e.localPort });
+    }),
+    native.addListener('onK8sPfStatus', (e: PfStatusEvent) => {
+      if (e.id === id) cb.onStatus?.({ kind: e.kind, bridges: e.bridges });
+    }),
+    native.addListener('onK8sPfError', (e: PfErrorEvent) => {
+      if (e.id === id) cb.onError?.({ name: e.name, message: e.message });
+    }),
+    native.addListener('onK8sPfClosed', (e: PfClosedEvent) => {
+      if (e.id !== id) return;
+      cb.onClosed?.({ reason: e.reason });
+      cleanup();
+    }),
+  );
+
+  return {
+    id,
+    stop() {
+      if (stopped) return;
+      native.stopPortForward(id);
+      // Don't cleanup the listeners here — wait for onClosed so the caller
+      // sees the close event for symmetry with crash / cluster-side failures.
     },
   };
 }
