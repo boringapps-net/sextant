@@ -182,6 +182,16 @@ export async function listHelmReleases(
   for (const s of latest.values()) {
     const r = decodeHelmRelease(s);
     if (r) releases.push(r);
+    // Yield between decodes. pako.inflate runs synchronously on the JS
+    // thread and a real-world chart manifest (e.g. kube-prometheus-stack)
+    // can be hundreds of KB to several MB compressed — long enough to
+    // block the thread for the Drawer's native Pan recogniser to mis-
+    // activate from incidental touches and leave the drawer in a stuck-
+    // open state that JS can't recover. Yielding lets gesture events
+    // process between releases. Demo fixtures are small enough that they
+    // never tripped this, which is why the bug only showed against real
+    // clusters.
+    await yieldToEventLoop();
   }
   // Sort by lastDeployed desc; fallback to name asc.
   releases.sort((a, b) => {
@@ -209,9 +219,17 @@ export async function getReleaseHistory(
   for (const s of list.items) {
     const r = decodeHelmRelease(s);
     if (r) out.push(r);
+    await yieldToEventLoop();
   }
   out.sort((a, b) => a.version - b.version);
   return out;
+}
+
+// Hands a frame back to the event loop. setTimeout(0) is clamped to a few
+// ms by Hermes but that's fine — we only need long enough for native
+// gesture events and a paint pass to slip in between heavy decodes.
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 // ── base64 helpers (Hermes-friendly, no Buffer) ────────────────────────────
