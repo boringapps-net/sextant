@@ -412,6 +412,46 @@ export function DrawerContent(props: any) {
               </Pressable>
             );
           })()}
+          {(() => {
+            const focused = pathname.startsWith('/helm');
+            return (
+              <Pressable
+                onPress={() => go('/(app)/(stack)/helm')}
+                style={({ pressed }) => ({
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: Spacing.md,
+                  paddingLeft: Spacing.sm,
+                  paddingRight: Spacing.sm,
+                  paddingVertical: 8,
+                  borderRadius: Radii.md,
+                  backgroundColor: focused
+                    ? c.accentSubtle
+                    : pressed
+                    ? c.surfaceMuted
+                    : 'transparent',
+                })}
+              >
+                <Icon
+                  ios="shippingbox"
+                  android="inventory_2"
+                  size={18}
+                  color={focused ? c.accent : c.textSecondary}
+                />
+                <Text
+                  style={{
+                    ...Typography.callout,
+                    color: focused ? c.accent : c.text,
+                    fontWeight: focused ? '600' : '400',
+                    flex: 1,
+                  }}
+                  numberOfLines={1}
+                >
+                  Helm releases
+                </Text>
+              </Pressable>
+            );
+          })()}
         </View>
 
         {clusters.length > 1 ? (

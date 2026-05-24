@@ -7,11 +7,11 @@
 import { age } from '../util/time';
 import type { K8sObject } from './types';
 
-export type Column = {
+export type Column<T = K8sObject> = {
   key: string;
   label: string;
   // String renderer. Tables show plain text in cells.
-  render: (obj: K8sObject) => string;
+  render: (obj: T) => string;
   // Flex weight inside the row. Defaults to 1.
   weight?: number;
   // Soft minimum px the cell needs to read comfortably. Used for hide order.

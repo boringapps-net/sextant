@@ -12,26 +12,30 @@ import { Colors, Radii, Spacing, Typography } from '@/lib/ui/theme';
 import { Icon } from '@/lib/ui/Icon';
 import { Glass } from '@/lib/ui/glass';
 import type { Column } from '@/lib/k8s/row-columns';
-import type { K8sObject } from '@/lib/k8s/types';
-import { summarize, type RowSummary } from '@/lib/k8s/row-summaries';
+import type { RowSummary } from '@/lib/k8s/row-summaries';
 
-type Props = {
-  items: K8sObject[];
-  kind: string;
-  columns: Column[];
+// Generic — works for any item type, not just K8sObject. Callers pass
+// getKey + getStatus to bridge into their domain. Used by R-list (with
+// K8sObject), helm list (HelmRelease), and port-forwards (PortForwardEntry).
+type Props<T> = {
+  items: T[];
+  columns: Column<T>[];
   width: number;
   // What comes above the table — search bar + error card, etc.
   listHeader?: React.ReactElement | null;
   refreshing: boolean;
   onRefresh: () => void;
-  onPressRow: (item: K8sObject) => void;
+  onPressRow: (item: T) => void;
+  // Per-item stable key + status colour for the left-edge dot.
+  getKey: (item: T) => string;
+  getStatus: (item: T) => RowSummary['status'];
   emptyIcon?: { ios: string; android: string };
   emptyLabel?: string;
 };
 
 // Pick columns that fit. `priority` orders the drop sequence (higher = drop first).
 // The first column is always kept.
-function chooseColumns(columns: Column[], available: number): Column[] {
+function chooseColumns<T>(columns: Column<T>[], available: number): Column<T>[] {
   // Sort descending by priority so we drop in that order.
   const dropOrder = [...columns]
     .map((c, i) => ({ c, i }))
@@ -39,7 +43,7 @@ function chooseColumns(columns: Column[], available: number): Column[] {
 
   // Start with everything; while overflow, drop the next entry.
   const keep = new Set(columns.map((c) => c.key));
-  const minWidth = (c: Column) => c.minWidth ?? 80;
+  const minWidth = (c: Column<T>) => c.minWidth ?? 80;
   let used = columns.reduce((n, c) => n + minWidth(c), 0);
   for (const { c } of dropOrder) {
     if (used <= available) break;
@@ -54,18 +58,19 @@ function chooseColumns(columns: Column[], available: number): Column[] {
 const CELL_PADDING = Spacing.sm;
 const STATUS_DOT_WIDTH = 16; // dot + gap
 
-export function ResourceTable({
+export function ResourceTable<T>({
   items,
-  kind,
   columns,
   width,
   listHeader,
   refreshing,
   onRefresh,
   onPressRow,
+  getKey,
+  getStatus,
   emptyIcon,
   emptyLabel,
-}: Props) {
+}: Props<T>) {
   const scheme = useScheme();
   const c = Colors[scheme];
 
@@ -124,9 +129,9 @@ export function ResourceTable({
   );
 
   return (
-    <FlatList
+    <FlatList<T>
       data={items}
-      keyExtractor={(i) => i.metadata.uid ?? `${i.metadata.namespace}/${i.metadata.name}`}
+      keyExtractor={getKey}
       contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={{ paddingBottom: 60 }}
       stickyHeaderIndices={[0]}
@@ -140,7 +145,7 @@ export function ResourceTable({
       renderItem={({ item }) => (
         <TableRow
           item={item}
-          kind={kind}
+          status={getStatus(item)}
           columns={visibleCols}
           totalWeight={totalWeight}
           onPress={() => onPressRow(item)}
@@ -160,22 +165,21 @@ export function ResourceTable({
 
 const StyleSheetHairline = Platform.select({ ios: 0.5, default: 1 }) as number;
 
-function TableRow({
+function TableRow<T>({
   item,
-  kind,
+  status,
   columns,
   totalWeight,
   onPress,
 }: {
-  item: K8sObject;
-  kind: string;
-  columns: Column[];
+  item: T;
+  status: RowSummary['status'];
+  columns: Column<T>[];
   totalWeight: number;
   onPress: () => void;
 }) {
   const scheme = useScheme();
   const c = Colors[scheme];
-  const s = summarize(kind, item);
   return (
     <Pressable
       onPress={onPress}
@@ -189,7 +193,7 @@ function TableRow({
       })}
     >
       <View style={{ width: STATUS_DOT_WIDTH, alignItems: 'flex-start' }}>
-        <StatusDot status={s.status} />
+        <StatusDot status={status} />
       </View>
       {columns.map((col) => (
         <View

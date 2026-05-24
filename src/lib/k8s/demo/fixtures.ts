@@ -10,6 +10,7 @@
 // seconds per screen, not minutes.
 
 import type { K8sObject } from '../types';
+import { encodeHelmRelease, type HelmReleaseRaw } from '../helm';
 
 // Anchor "now" once per session so creationTimestamp ages look plausible
 // (instead of every pod claiming it started 0 seconds ago).
@@ -866,6 +867,139 @@ export function buildInitialFixtures(): K8sObject[] {
     status: { replicas: 1, readyReplicas: 1, currentReplicas: 1, observedGeneration: 1 },
   } as K8sObject);
 
+  // ── Helm releases ────────────────────────────────────────────────────────
+  // Stored as helm.sh/release.v1 Secrets — the exact wire format the Helm
+  // CLI uses. The list / detail screens decode them via the same
+  // src/lib/k8s/helm.ts pipeline real clusters go through, so the demo can't
+  // accidentally accept a payload shape that wouldn't decode in production.
+
+  pushHelmRelease(all, {
+    name: 'warp',
+    namespace: 'demo-app',
+    version: 2,
+    status: 'deployed',
+    chartName: 'warp',
+    chartVersion: '0.5.2',
+    appVersion: '1.2.0',
+    description: 'Modern Kubernetes-native web app platform',
+    icon: 'https://avatars.githubusercontent.com/u/0?s=200',
+    home: 'https://github.com/example/warp',
+    keywords: ['web', 'platform', 'demo'],
+    defaultValues: {
+      replicaCount: 1,
+      image: { repository: 'ghcr.io/example/warp', tag: 'latest', pullPolicy: 'IfNotPresent' },
+      service: { type: 'ClusterIP', port: 80 },
+      ingress: { enabled: false, className: 'nginx', host: 'demo.example.com' },
+      resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
+    },
+    config: {
+      replicaCount: 3,
+      image: { tag: '1.2.0' },
+      ingress: { enabled: true, host: 'demo.example.com', tls: true },
+    },
+    manifest:
+      '---\n# Source: warp/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: warp-warp-frontend\n  namespace: demo-app\n  labels:\n    app.kubernetes.io/name: warp\n    app.kubernetes.io/instance: warp\n    app.kubernetes.io/version: "1.2.0"\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: warp\n  template:\n    spec:\n      containers:\n        - name: warp\n          image: "ghcr.io/example/warp:1.2.0"\n          ports:\n            - containerPort: 3000\n---\n# Source: warp/templates/service.yaml\napiVersion: v1\nkind: Service\nmetadata:\n  name: warp\n  namespace: demo-app\nspec:\n  type: ClusterIP\n  ports:\n    - port: 80\n      targetPort: 3000\n  selector:\n    app.kubernetes.io/name: warp\n',
+    notes:
+      "1. Get the application URL by running these commands:\n  https://demo.example.com/\n\n2. Watch the deployment roll out:\n  kubectl get pods -n demo-app -l app.kubernetes.io/instance=warp -w\n\nFor more information, see https://github.com/example/warp\n",
+    firstDeployed: ago(86400 * 1000 * 14),
+    lastDeployed: ago(86400 * 1000),
+  });
+
+  // Superseded revision of warp — gives the History view something to show.
+  pushHelmRelease(all, {
+    name: 'warp',
+    namespace: 'demo-app',
+    version: 1,
+    status: 'superseded',
+    chartName: 'warp',
+    chartVersion: '0.5.1',
+    appVersion: '1.1.5',
+    description: 'Modern Kubernetes-native web app platform',
+    defaultValues: { replicaCount: 1, image: { tag: 'latest' } },
+    config: { replicaCount: 2, image: { tag: '1.1.5' } },
+    manifest: '---\n# (truncated — see latest revision for full manifest)\n',
+    notes: 'Initial install.',
+    firstDeployed: ago(86400 * 1000 * 14),
+    lastDeployed: ago(86400 * 1000 * 14),
+  });
+
+  pushHelmRelease(all, {
+    name: 'redis',
+    namespace: 'demo-app',
+    version: 1,
+    status: 'deployed',
+    chartName: 'redis',
+    chartVersion: '19.5.2',
+    appVersion: '7.4.0',
+    description: 'Redis(R) is an open source, advanced key-value store.',
+    home: 'https://github.com/bitnami/charts/tree/main/bitnami/redis',
+    keywords: ['redis', 'keyvalue', 'database'],
+    defaultValues: {
+      architecture: 'standalone',
+      auth: { enabled: false },
+      master: { persistence: { enabled: true, size: '8Gi' } },
+    },
+    config: {
+      architecture: 'standalone',
+      master: { persistence: { size: '8Gi' } },
+    },
+    manifest:
+      '---\n# Source: redis/templates/master/statefulset.yaml\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: redis-master\n  namespace: demo-app\nspec:\n  serviceName: redis-master\n  replicas: 1\n',
+    firstDeployed: ago(86400 * 1000 * 7),
+    lastDeployed: ago(86400 * 1000 * 7),
+  });
+
+  pushHelmRelease(all, {
+    name: 'kube-prometheus-stack',
+    namespace: 'monitoring',
+    version: 3,
+    status: 'deployed',
+    chartName: 'kube-prometheus-stack',
+    chartVersion: '63.1.0',
+    appVersion: 'v0.76.1',
+    description: 'kube-prometheus-stack collects Kubernetes manifests, dashboards, and Prometheus rules with documentation and scripts to provide easy to operate end-to-end Kubernetes cluster monitoring with Prometheus using the Prometheus Operator.',
+    home: 'https://github.com/prometheus-operator/kube-prometheus',
+    keywords: ['operator', 'prometheus', 'kube-prometheus', 'monitoring'],
+    defaultValues: {
+      grafana: { enabled: true, defaultDashboardsEnabled: true },
+      prometheus: { enabled: true, prometheusSpec: { retention: '10d' } },
+      alertmanager: { enabled: true },
+    },
+    config: {
+      grafana: {
+        enabled: true,
+        adminPassword: 'admin-demo-2026',
+        ingress: { enabled: true, hosts: ['grafana.demo.example.com'] },
+      },
+      prometheus: {
+        prometheusSpec: { retention: '30d', resources: { requests: { memory: '512Mi', cpu: '200m' } } },
+      },
+    },
+    manifest:
+      '---\n# Source: kube-prometheus-stack/charts/grafana/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: kube-prometheus-stack-grafana\n  namespace: monitoring\nspec:\n  replicas: 1\n',
+    firstDeployed: ago(86400 * 1000 * 30),
+    lastDeployed: ago(3600 * 1000 * 4),
+  });
+
+  // A failed release — gives the list view a non-green status badge.
+  pushHelmRelease(all, {
+    name: 'experimental-cache',
+    namespace: 'demo-app',
+    version: 1,
+    status: 'failed',
+    chartName: 'memcached',
+    chartVersion: '7.4.5',
+    appVersion: '1.6.30',
+    description: 'A high-performance, distributed memory object caching system.',
+    defaultValues: { replicaCount: 3 },
+    config: { replicaCount: 3, persistence: { enabled: true, size: '100Gi' } },
+    manifest: '---\n# (manifest omitted — release failed during install)\n',
+    notes: 'Install failed. Run "helm uninstall experimental-cache" to clean up.',
+    firstDeployed: ago(3600 * 1000 * 2),
+    lastDeployed: ago(3600 * 1000 * 2),
+    description2: 'failed to install: timed out waiting for the condition',
+  });
+
   // ── CRDs: cert-manager + ArgoCD ──────────────────────────────────────────
   // These exist purely to demonstrate that the app handles non-builtin
   // resources properly. The cert-manager operator pod isn't included —
@@ -1141,4 +1275,82 @@ export function buildInitialFixtures(): K8sObject[] {
   } as K8sObject);
 
   return all;
+}
+
+// ── Helm release fixture helper ────────────────────────────────────────────
+
+type HelmReleaseFixture = {
+  name: string;
+  namespace: string;
+  version: number;
+  status: string;
+  chartName: string;
+  chartVersion: string;
+  appVersion?: string;
+  description?: string;
+  icon?: string;
+  home?: string;
+  keywords?: string[];
+  defaultValues: Record<string, any>;
+  config: Record<string, any>;
+  manifest: string;
+  notes?: string;
+  firstDeployed?: string;
+  lastDeployed?: string;
+  /** Optional override for release.info.description (defaults to status-y blurb). */
+  description2?: string;
+};
+
+function pushHelmRelease(all: K8sObject[], opts: HelmReleaseFixture) {
+  const raw: HelmReleaseRaw = {
+    name: opts.name,
+    namespace: opts.namespace,
+    version: opts.version,
+    info: {
+      status: opts.status,
+      first_deployed: opts.firstDeployed,
+      last_deployed: opts.lastDeployed,
+      description: opts.description2
+        ?? (opts.status === 'deployed' ? 'Install complete' : `Release ${opts.status}`),
+      notes: opts.notes,
+    },
+    chart: {
+      metadata: {
+        name: opts.chartName,
+        version: opts.chartVersion,
+        appVersion: opts.appVersion,
+        description: opts.description,
+        icon: opts.icon,
+        home: opts.home,
+        keywords: opts.keywords,
+      },
+      values: opts.defaultValues,
+    },
+    config: opts.config,
+    manifest: opts.manifest,
+  };
+
+  // encodeHelmRelease returns the inner base64 string. Wrap once more with
+  // btoa because the demo Secret data path doesn't go through a real K8s
+  // API server — it just stores `data` as-is on the in-memory object.
+  const inner = encodeHelmRelease(raw);
+  all.push({
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: `sh.helm.release.v1.${opts.name}.v${opts.version}`,
+      namespace: opts.namespace,
+      uid: uid(),
+      resourceVersion: String(Math.floor(Math.random() * 100000)),
+      creationTimestamp: opts.lastDeployed ?? ago(86400 * 1000),
+      labels: {
+        owner: 'helm',
+        name: opts.name,
+        version: String(opts.version),
+        status: opts.status,
+      },
+    },
+    type: 'helm.sh/release.v1',
+    data: { release: globalThis.btoa(inner) },
+  } as unknown as K8sObject);
 }

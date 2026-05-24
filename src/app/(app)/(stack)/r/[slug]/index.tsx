@@ -99,11 +99,12 @@ export default function ResourceList() {
           <ActivityIndicator color={c.accent} />
         </View>
       ) : useTable ? (
-        <ResourceTable
+        <ResourceTable<K8sObject>
           items={filtered}
-          kind={def.kind}
           columns={columnsFor(def.kind, def.namespaced)}
           width={tableViewport}
+          getKey={(o) => o.metadata.uid ?? `${o.metadata.namespace}/${o.metadata.name}`}
+          getStatus={(o) => summarize(def.kind, o).status}
           // The watch keeps data live, so pull-to-refresh is mostly cosmetic;
           // we never have a "refreshing" state to show. Force-flicker would
           // actually defeat the live updates, so this is a no-op spinner.
