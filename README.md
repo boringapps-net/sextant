@@ -1,56 +1,85 @@
-# Welcome to your Expo app 👋
+# Sextant
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A native Kubernetes client for iPhone, iPad, and Android.
 
-## Get started
+- App Store: TODO
+- Google Play: TODO
 
-1. Install dependencies
+## What it is
 
-   ```bash
-   npm install
-   ```
+Sextant talks directly to your Kubernetes clusters' API servers from
+your phone. List and inspect pods, deployments, services, nodes, every
+built-in resource and any CRD the cluster exposes. View Helm releases
+(values, manifests, revision history). Open a port-forward to a pod or
+service and reach it in Safari. Tail logs. Exec into a container.
 
-2. Start the app
+It's a single-binary mobile app. There is no Sextant cloud, no Sextant
+backend, no account to create. Your phone is the kubectl.
 
-   ```bash
-   npx expo start
-   ```
+## Why the source is here
 
-In the output, you'll find options to open the app in a
+This repo exists so you can verify what Sextant does on your device.
+Mobile apps that talk to production infrastructure are a reasonable
+thing to be suspicious of, so the entire client is published as source
+under [FSL-1.1-MIT](LICENSE).
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+Things you can check for yourself:
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+- **No analytics, no telemetry, no crash reporters.** The
+  `package.json` lists every dependency; there is no Sentry, Firebase,
+  Amplitude, PostHog, or equivalent. Nothing phones home.
+- **Credentials never leave your device.** Tokens, kubeconfig
+  passwords, and client certificates are written to the OS secure
+  enclave via [`expo-secure-store`](https://docs.expo.dev/versions/v56.0.0/sdk/securestore/)
+  (Keychain on iOS, Android Keystore on Android). See
+  `src/lib/storage/clusters.ts`.
+- **Traffic goes phone → API server, full stop.** There is no
+  intermediate proxy. The HTTPS request your cluster sees comes from
+  your device's IP. See `src/lib/k8s/client.ts`.
+- **Cluster metadata (names, server URLs) lives in AsyncStorage** —
+  not secret, but also not exfiltrated. Same `clusters.ts` file.
 
-## Get a fresh project
+If you find anything in here that contradicts the above, please open
+an issue.
 
-When you're ready, run:
+## Demo mode
+
+The app ships a built-in demo cluster: an in-memory Kubernetes API
+implementation seeded with realistic fixtures (pods, deployments,
+events, Helm releases, the lot). It exists so the App Store / Play
+Store reviewers, and anyone curious before adding their own cluster,
+have something to interact with that doesn't require a real
+kubeconfig. Source is in `src/lib/k8s/demo/`.
+
+## License
+
+[FSL-1.1-MIT](LICENSE) — Functional Source License, MIT Future
+License.
+
+The short version: you may read, fork, modify, run, study, and
+contribute back. You may **not** ship a competing app built on this
+source — including, specifically, repackaging the binary and
+publishing it to the App Store or Google Play. Two years after each
+release, that version automatically becomes available under the MIT
+License with no restrictions.
+
+If you want to do something the license doesn't permit, get in touch.
+
+## Building from source
+
+For developers who want to run a local build against their own
+clusters, or contribute a patch.
+
+Requirements: Node 20+, pnpm, Xcode (for iOS), Android Studio (for
+Android), an Expo dev client build.
 
 ```bash
-npm run reset-project
+pnpm install
+pnpm expo prebuild
+pnpm expo run:ios       # or run:android
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-### Other setup steps
-
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+The app uses [Expo Router](https://docs.expo.dev/versions/v56.0.0/)
+56. File-based routes live under `src/app/`. The K8s client is in
+`src/lib/k8s/`. UI primitives in `src/lib/ui/`. Contributor notes are
+in `AGENTS.md`.
