@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { K8sClient, type ClusterConnection } from '../k8s/client';
+import { DemoK8sClient, isDemoCluster } from '../k8s/demo/client';
 import {
   listClusters,
   saveCluster,
@@ -51,7 +52,12 @@ export function ClusterProvider({ children }: { children: React.ReactNode }) {
     () => clusters.find((c) => c.id === activeId) ?? null,
     [clusters, activeId],
   );
-  const client = useMemo(() => (active ? new K8sClient(active) : null), [active]);
+  const client = useMemo(() => {
+    if (!active) return null;
+    // The demo cluster is a sentinel ClusterConnection — route it to the
+    // in-memory DemoK8sClient instead of the network-backed K8sClient.
+    return isDemoCluster(active) ? new DemoK8sClient() : new K8sClient(active);
+  }, [active]);
 
   const saveAndActivate = useCallback(async (c: ClusterConnection) => {
     await saveCluster(c);

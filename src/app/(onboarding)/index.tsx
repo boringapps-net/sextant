@@ -5,11 +5,22 @@ import { useRouter } from 'expo-router';
 import { Colors, Radii, Spacing, Typography } from '@/lib/ui/theme';
 import { Glass } from '@/lib/ui/glass';
 import { Icon } from '@/lib/ui/Icon';
+import { useClusters } from '@/lib/state/cluster-context';
+import { buildDemoCluster } from '@/lib/k8s/demo/client';
 
 export default function Welcome() {
   const scheme = useScheme();
   const c = Colors[scheme];
   const router = useRouter();
+  const { saveAndActivate } = useClusters();
+
+  async function startDemo() {
+    // Persist the demo as a real cluster entry so the user can come back to
+    // it later (and delete it like any other cluster). ClusterProvider
+    // routes its server="demo://sextant" sentinel to DemoK8sClient.
+    await saveAndActivate(buildDemoCluster());
+    router.replace('/(app)/(stack)' as any);
+  }
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.background }}>
       <ScrollView contentContainerStyle={{ flexGrow: 1, padding: Spacing.xl, justifyContent: 'center' }}>
@@ -42,6 +53,26 @@ export default function Welcome() {
           })}
         >
           <Text style={{ color: '#fff', fontWeight: '600', fontSize: 17 }}>Add your first cluster</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={startDemo}
+          style={({ pressed }) => ({
+            marginTop: Spacing.md,
+            paddingVertical: 14,
+            borderRadius: Radii.lg,
+            alignItems: 'center',
+            backgroundColor: pressed ? c.surfaceMuted : 'transparent',
+            borderWidth: 1,
+            borderColor: c.separator,
+          })}
+        >
+          <Text style={{ color: c.text, fontWeight: '600', fontSize: 16 }}>
+            Try with demo data
+          </Text>
+          <Text style={{ ...Typography.caption1, color: c.textSecondary, marginTop: 2 }}>
+            A simulated cluster with live-updating fixtures. No real K8s needed.
+          </Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
