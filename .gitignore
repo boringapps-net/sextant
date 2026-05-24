@@ -46,3 +46,8 @@ example
 *.ipa
 *.apk
 *.aab
+build-*.tar.gz
+
+# python (marketing build script cache)
+__pycache__/
+*.pyc
