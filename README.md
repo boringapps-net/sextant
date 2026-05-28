@@ -2,7 +2,9 @@
 
 A native Kubernetes client for iPhone, iPad, and Android.
 
-- App Store: TODO
+[![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/us/app/sextant/id6772725984)
+
+- App Store: https://apps.apple.com/us/app/sextant/id6772725984
 - Google Play: TODO
 
 ## What it is
