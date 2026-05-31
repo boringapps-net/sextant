@@ -1,0 +1,174 @@
+name: Android – Play Store
+
+# Builds a signed Android App Bundle (.aab) with EAS **local** builds — the build
+# runs entirely on the GitHub runner (no Expo cloud build, no remote credentials).
+# Signing material comes from repo secrets via a local credentials.json, and the
+# bundle is uploaded to the Google Play **internal** track.
+#
+# Trigger: manual (Actions → Android – Play Store → Run workflow) or a v*.*.* tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Override versionCode (leave empty to auto-derive from run number)"
+        required: false
+        default: ""
+      track:
+        description: "Play track to publish to"
+        required: false
+        default: internal
+        type: choice
+        options:
+          - internal
+          - alpha
+          - beta
+          - production
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: android-playstore-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    name: Build & upload to Google Play
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate required secrets
+        run: |
+          missing=0
+          for s in EXPO_TOKEN ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD PLAY_SERVICE_ACCOUNT_JSON; do
+            if [ -z "${!s}" ]; then
+              echo "::error::Required secret '$s' is not set."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install EAS CLI
+        run: pnpm add -g eas-cli
+
+      - name: Resolve package name & compute version code
+        id: meta
+        run: |
+          PKG=$(node -p "require('./app.json').expo.android.package")
+          echo "package=$PKG" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.build_number }}" ]; then
+            VC="${{ inputs.build_number }}"
+          else
+            VC=$(( ${{ github.run_number }} + 100 ))
+          fi
+          echo "version_code=$VC" >> "$GITHUB_OUTPUT"
+          echo "Package: $PKG  versionCode: $VC"
+
+      - name: Patch versionCode into app.json
+        run: |
+          # appVersionSource is "local", so EAS reads the versionCode straight
+          # from app config. Stamp a monotonic value before building.
+          node -e '
+            const fs = require("fs");
+            const cfg = require("./app.json");
+            cfg.expo.android = cfg.expo.android || {};
+            cfg.expo.android.versionCode = Number(process.env.VC);
+            fs.writeFileSync("./app.json", JSON.stringify(cfg, null, 2) + "\n");
+          '
+          echo "android.versionCode -> $(node -p "require('./app.json').expo.android.versionCode")"
+        env:
+          VC: ${{ steps.meta.outputs.version_code }}
+
+      - name: Write local Android credentials
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p credentials
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > credentials/upload-keystore.jks
+          cat > credentials.json <<EOF
+          {
+            "android": {
+              "keystore": {
+                "keystorePath": "credentials/upload-keystore.jks",
+                "keystorePassword": "$ANDROID_KEYSTORE_PASSWORD",
+                "keyAlias": "$ANDROID_KEY_ALIAS",
+                "keyPassword": "$ANDROID_KEY_PASSWORD"
+              }
+            }
+          }
+          EOF
+
+      - name: Build signed App Bundle (EAS local)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          eas build \
+            --platform android \
+            --profile production \
+            --local \
+            --non-interactive \
+            --output "$RUNNER_TEMP/sextant.aab"
+
+      - name: Upload to Google Play
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ steps.meta.outputs.package }}
+          releaseFiles: ${{ runner.temp }}/sextant.aab
+          track: ${{ inputs.track || 'internal' }}
+          status: completed
+
+      - name: Archive AAB artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sextant-android-${{ steps.meta.outputs.version_code }}
+          path: ${{ runner.temp }}/sextant.aab
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Android build (EAS local)"
+            echo ""
+            echo "- Package: \`${{ steps.meta.outputs.package }}\`"
+            echo "- Version code: \`${{ steps.meta.outputs.version_code }}\`"
+            echo "- Track: \`${{ inputs.track || 'internal' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
