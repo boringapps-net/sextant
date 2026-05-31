@@ -22,6 +22,10 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# EAS local credentials (written by CI from secrets — never commit the real ones)
+credentials.json
+credentials/
+
 # Metro
 .metro-health-check*
 
